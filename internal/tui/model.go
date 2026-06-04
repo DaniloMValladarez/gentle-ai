@@ -246,6 +246,7 @@ const (
 	ScreenPreset
 	ScreenClaudeModelPicker
 	ScreenKiroModelPicker
+	ScreenCodexModelPicker
 	ScreenSDDMode
 	ScreenStrictTDD
 	ScreenOpenCodePlugins
@@ -302,8 +303,9 @@ type Model struct {
 	Execution         pipeline.ExecutionResult
 	Backups           []backup.Manifest
 	ModelPicker       screens.ModelPickerState
-	ClaudeModelPicker screens.ClaudeModelPickerState
-	KiroModelPicker   screens.KiroModelPickerState
+	ClaudeModelPicker  screens.ClaudeModelPickerState
+	KiroModelPicker    screens.KiroModelPickerState
+	CodexModelPicker   screens.CodexModelPickerState
 	SkillPicker       []model.SkillID
 	Err               error
 
@@ -3341,6 +3343,11 @@ func (m Model) shouldShowClaudeModelPickerScreen() bool {
 
 func (m Model) shouldShowKiroModelPickerScreen() bool {
 	return m.Selection.HasAgent(model.AgentKiroIDE) &&
+		hasSelectedComponent(m.Selection.Components, model.ComponentSDD)
+}
+
+func (m Model) shouldShowCodexModelPickerScreen() bool {
+	return m.Selection.HasAgent(model.AgentCodex) &&
 		hasSelectedComponent(m.Selection.Components, model.ComponentSDD)
 }
 
