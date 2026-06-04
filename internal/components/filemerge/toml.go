@@ -131,8 +131,8 @@ func UpsertTOMLTableKey(content, section, key, rawValue string) string {
 	newLine := key + " = " + rawValue
 
 	// Find the section header and collect the indices of the key lines within it.
-	sectionLine := -1       // line index of the [section] header
-	var keyLines []int      // indices of lines matching key= or key = inside the section
+	sectionLine := -1  // line index of the [section] header
+	var keyLines []int // indices of lines matching key= or key = inside the section
 
 	inSection := false
 	for i, line := range lines {
@@ -164,24 +164,37 @@ func UpsertTOMLTableKey(content, section, key, rawValue string) string {
 		return base + "\n\n" + header + "\n" + newLine + "\n"
 	}
 
-	// Section present — remove stale key occurrences, then insert after header.
-	keySet := make(map[int]bool, len(keyLines))
-	for _, idx := range keyLines {
-		keySet[idx] = true
+	if len(keyLines) > 0 {
+		// Key already exists in the section.
+		// Replace the first occurrence in place; drop any duplicates.
+		firstKey := keyLines[0]
+		dupSet := make(map[int]bool, len(keyLines)-1)
+		for _, idx := range keyLines[1:] {
+			dupSet[idx] = true
+		}
+
+		var out []string
+		for i, line := range lines {
+			if dupSet[i] {
+				continue // drop duplicates
+			}
+			if i == firstKey {
+				out = append(out, newLine) // replace in place
+				continue
+			}
+			out = append(out, line)
+		}
+		return strings.TrimSpace(strings.Join(out, "\n")) + "\n"
 	}
 
+	// Section present but key absent — insert as the first line after the header.
 	var out []string
 	for i, line := range lines {
-		if keySet[i] {
-			continue // drop old key line
-		}
 		out = append(out, line)
 		if i == sectionLine {
-			// Insert the new key immediately after the section header.
 			out = append(out, newLine)
 		}
 	}
-
 	return strings.TrimSpace(strings.Join(out, "\n")) + "\n"
 }
 
