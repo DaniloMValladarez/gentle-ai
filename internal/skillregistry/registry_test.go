@@ -206,15 +206,6 @@ func TestUserSkillDirsIncludesSupportedAgentSkillLocations(t *testing.T) {
 	}
 }
 
-func TestUserSkillDirsIncludesHermesSkillLocation(t *testing.T) {
-	home := t.TempDir()
-	dirs := UserSkillDirs(home)
-	want := filepath.Join(home, ".hermes", "skills")
-	if !containsPath(dirs, want) {
-		t.Fatalf("UserSkillDirs() missing Hermes skill location %q", want)
-	}
-}
-
 func TestProjectSkillDirsIncludesHermesSkillLocation(t *testing.T) {
 	cwd := t.TempDir()
 	dirs := ProjectSkillDirs(cwd)

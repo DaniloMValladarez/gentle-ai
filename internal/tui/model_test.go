@@ -2769,11 +2769,11 @@ func TestModelConfig_EscFromPickersReturnsToModelConfig(t *testing.T) {
 	}
 }
 
-// TestPreselectedAgents_AllSixAgentsMappedCorrectly verifies every canonical
+// TestPreselectedAgents_AllKnownAgentsMappedCorrectly verifies every canonical
 // agent string maps to its model.AgentID constant in preselectedAgents.
 // This prevents silent drops when new agents are added to ScanConfigs without
 // updating the TUI switch statement.
-func TestPreselectedAgents_AllSixAgentsMappedCorrectly(t *testing.T) {
+func TestPreselectedAgents_AllKnownAgentsMappedCorrectly(t *testing.T) {
 	tests := []struct {
 		configAgent string
 		wantID      model.AgentID
