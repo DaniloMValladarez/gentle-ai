@@ -518,6 +518,11 @@ func Inject(homeDir string, adapter agents.Adapter, sddMode model.SDDModeID, opt
 				if profile.Name == "" || profile.Name == "default" {
 					continue
 				}
+				cleanupResult, cleanupErr := cleanupStaleProfileJDAgents(settingsPath, profile)
+				if cleanupErr != nil {
+					return InjectionResult{}, fmt.Errorf("clean stale profile JD agents %q: %w", profile.Name, cleanupErr)
+				}
+				changed = changed || cleanupResult.Changed
 				profileOverlay, profileErr := GenerateProfileOverlay(profile, homeDir)
 				if profileErr != nil {
 					return InjectionResult{}, fmt.Errorf("generate profile overlay %q: %w", profile.Name, profileErr)

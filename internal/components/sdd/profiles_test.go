@@ -117,6 +117,9 @@ func TestProfileAgentKeys_Named(t *testing.T) {
 		"sdd-verify-cheap",
 		"sdd-archive-cheap",
 		"sdd-onboard-cheap",
+		"jd-judge-a-cheap",
+		"jd-judge-b-cheap",
+		"jd-fix-agent-cheap",
 	}
 
 	if len(keys) != len(want) {
@@ -168,8 +171,8 @@ func TestProfileAgentKeys_Default(t *testing.T) {
 }
 
 func TestProfileAgentKeys_Count(t *testing.T) {
-	if n := len(ProfileAgentKeys("cheap")); n != 11 {
-		t.Errorf("ProfileAgentKeys(\"cheap\") = %d keys, want 11", n)
+	if n := len(ProfileAgentKeys("cheap")); n != 14 {
+		t.Errorf("ProfileAgentKeys(\"cheap\") = %d keys, want 14", n)
 	}
 	if n := len(ProfileAgentKeys("")); n != 11 {
 		t.Errorf("ProfileAgentKeys(\"\") = %d keys, want 11", n)
@@ -336,6 +339,51 @@ func TestDetectProfiles_TwoProfiles(t *testing.T) {
 	}
 }
 
+func TestDetectProfiles_ReadsProfileScopedJDAssignments(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "opencode.json")
+
+	content := `{
+  "agent": {
+    "sdd-orchestrator-cheap": { "mode": "primary", "model": "anthropic/claude-haiku-3-5" },
+    "sdd-init-cheap": { "mode": "subagent", "model": "anthropic/claude-haiku-3-5" },
+    "jd-judge-a-cheap": { "mode": "subagent", "model": "anthropic/claude-opus-4-5", "variant": "high" },
+    "jd-judge-b-cheap": { "mode": "subagent", "model": "openai/gpt-5.1" },
+    "jd-fix-agent-cheap": { "mode": "subagent", "model": "anthropic/claude-sonnet-4-20250514" }
+  }
+}`
+	if err := os.WriteFile(settingsPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	profiles, err := DetectProfiles(settingsPath)
+	if err != nil {
+		t.Fatalf("DetectProfiles() error = %v", err)
+	}
+	if len(profiles) != 1 {
+		t.Fatalf("DetectProfiles() returned %d profiles, want 1", len(profiles))
+	}
+
+	assignments := profiles[0].PhaseAssignments
+	checks := map[string]string{
+		"jd-judge-a":   "anthropic/claude-opus-4-5",
+		"jd-judge-b":   "openai/gpt-5.1",
+		"jd-fix-agent": "anthropic/claude-sonnet-4-20250514",
+	}
+	for phase, want := range checks {
+		got, ok := assignments[phase]
+		if !ok {
+			t.Fatalf("PhaseAssignments missing %q; got %v", phase, assignments)
+		}
+		if got.FullID() != want {
+			t.Errorf("%s model = %q, want %q", phase, got.FullID(), want)
+		}
+	}
+	if got := assignments["jd-judge-a"].Effort; got != "high" {
+		t.Errorf("jd-judge-a effort = %q, want high", got)
+	}
+}
+
 // ─── GenerateProfileOverlay ───────────────────────────────────────────────
 
 func makeHaikuProfile() model.Profile {
@@ -467,6 +515,118 @@ func TestGenerateProfileOverlay_PermissionScoped(t *testing.T) {
 
 	expected := expectedTaskPermissions("-cheap")
 	assertExactTaskPermissions(t, taskMap, expected)
+}
+
+func TestGenerateProfileOverlay_JDAssignmentsGenerateSuffixedAgents(t *testing.T) {
+	home := t.TempDir()
+	profile := makeHaikuProfile()
+	profile.PhaseAssignments["jd-judge-a"] = model.ModelAssignment{ProviderID: "anthropic", ModelID: "claude-opus-4-5", Effort: "high"}
+	profile.PhaseAssignments["jd-judge-b"] = model.ModelAssignment{ProviderID: "openai", ModelID: "gpt-5.1"}
+	profile.PhaseAssignments["jd-fix-agent"] = model.ModelAssignment{ProviderID: "anthropic", ModelID: "claude-sonnet-4-20250514"}
+
+	overlay, err := GenerateProfileOverlay(profile, home)
+	if err != nil {
+		t.Fatalf("GenerateProfileOverlay() error = %v", err)
+	}
+
+	var root map[string]any
+	if err := json.Unmarshal(overlay, &root); err != nil {
+		t.Fatalf("overlay is not valid JSON: %v", err)
+	}
+	agentMap := root["agent"].(map[string]any)
+
+	if len(agentMap) != 14 {
+		t.Fatalf("agent map has %d entries, want 14; keys: %v", len(agentMap), keysOf(agentMap))
+	}
+
+	checks := map[string]string{
+		"jd-judge-a-cheap":   "anthropic/claude-opus-4-5",
+		"jd-judge-b-cheap":   "openai/gpt-5.1",
+		"jd-fix-agent-cheap": "anthropic/claude-sonnet-4-20250514",
+	}
+	for key, wantModel := range checks {
+		agent, ok := agentMap[key].(map[string]any)
+		if !ok {
+			t.Fatalf("missing generated JD agent %q", key)
+		}
+		if mode, _ := agent["mode"].(string); mode != "subagent" {
+			t.Errorf("%s mode = %q, want subagent", key, mode)
+		}
+		if hidden, _ := agent["hidden"].(bool); !hidden {
+			t.Errorf("%s hidden = false, want true", key)
+		}
+		if gotModel, _ := agent["model"].(string); gotModel != wantModel {
+			t.Errorf("%s model = %q, want %q", key, gotModel, wantModel)
+		}
+	}
+
+	judgeA := agentMap["jd-judge-a-cheap"].(map[string]any)
+	if gotVariant, _ := judgeA["variant"].(string); gotVariant != "high" {
+		t.Errorf("jd-judge-a-cheap variant = %q, want high", gotVariant)
+	}
+	judgeB := agentMap["jd-judge-b-cheap"].(map[string]any)
+	if gotVariant, hasVariant := judgeB["variant"].(string); !hasVariant || gotVariant != "" {
+		t.Errorf("jd-judge-b-cheap variant = %q, has=%v; want empty variant key", gotVariant, hasVariant)
+	}
+	prompt := agentMap["sdd-orchestrator-cheap"].(map[string]any)["prompt"].(string)
+	for _, key := range []string{"jd-judge-a-cheap", "jd-judge-b-cheap", "jd-fix-agent-cheap"} {
+		if !strings.Contains(prompt, key) {
+			t.Errorf("profile orchestrator prompt missing suffixed JD agent %q", key)
+		}
+	}
+	if !strings.Contains(prompt, "`jd-judge-a` -> `jd-judge-a-cheap`") {
+		t.Errorf("profile orchestrator prompt missing explicit JD delegation mapping; prompt: %s", prompt)
+	}
+
+	orch := agentMap["sdd-orchestrator-cheap"].(map[string]any)
+	permission := orch["permission"].(map[string]any)
+	taskWrapper := permission["task"].(map[string]any)
+	taskMap := taskWrapper["__replace__"].(map[string]any)
+	for _, key := range []string{"jd-judge-a-cheap", "jd-judge-b-cheap", "jd-fix-agent-cheap"} {
+		if got := taskMap[key]; got != "allow" {
+			t.Errorf("task permission %q = %v, want allow", key, got)
+		}
+	}
+	for _, key := range []string{"jd-judge-a", "jd-judge-b", "jd-fix-agent"} {
+		if _, exists := taskMap[key]; exists {
+			t.Errorf("unexpected unsuffixed JD task permission %q when profile assignment exists", key)
+		}
+	}
+}
+
+func TestGenerateProfileOverlay_NoJDAssignmentsUsesGlobalJDAgents(t *testing.T) {
+	home := t.TempDir()
+
+	overlay, err := GenerateProfileOverlay(makeHaikuProfile(), home)
+	if err != nil {
+		t.Fatalf("GenerateProfileOverlay() error = %v", err)
+	}
+
+	var root map[string]any
+	if err := json.Unmarshal(overlay, &root); err != nil {
+		t.Fatalf("overlay is not valid JSON: %v", err)
+	}
+	agentMap := root["agent"].(map[string]any)
+	prompt := agentMap["sdd-orchestrator-cheap"].(map[string]any)["prompt"].(string)
+	if strings.Contains(prompt, "jd-judge-a-cheap") || strings.Contains(prompt, "jd-judge-b-cheap") || strings.Contains(prompt, "jd-fix-agent-cheap") {
+		t.Errorf("profile orchestrator prompt should not force suffixed JD agents without JD assignments")
+	}
+
+	for _, key := range []string{"jd-judge-a-cheap", "jd-judge-b-cheap", "jd-fix-agent-cheap"} {
+		if _, exists := agentMap[key]; exists {
+			t.Errorf("unexpected generated JD agent %q without profile assignment", key)
+		}
+	}
+
+	orch := agentMap["sdd-orchestrator-cheap"].(map[string]any)
+	permission := orch["permission"].(map[string]any)
+	taskWrapper := permission["task"].(map[string]any)
+	taskMap := taskWrapper["__replace__"].(map[string]any)
+	for _, key := range []string{"jd-judge-a", "jd-judge-b", "jd-fix-agent"} {
+		if got := taskMap[key]; got != "allow" {
+			t.Errorf("global JD task permission %q = %v, want allow", key, got)
+		}
+	}
 }
 
 func TestGenerateProfileOverlay_ToolsUseReplaceSentinel(t *testing.T) {
@@ -684,7 +844,7 @@ func buildSettingsWithProfiles(t *testing.T) (path string) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "opencode.json")
 
-	// Build JSON with default (11 keys) + cheap (11 keys) = 22 total
+	// Build JSON with default (11 keys) + cheap (14 keys) = 25 total
 	agents := make(map[string]any)
 
 	// Default agents (no suffix)
@@ -699,6 +859,9 @@ func buildSettingsWithProfiles(t *testing.T) (path string) {
 		"sdd-apply-cheap", "sdd-verify-cheap", "sdd-archive-cheap", "sdd-onboard-cheap"} {
 		agents[key] = map[string]any{"mode": "subagent"}
 	}
+	for _, key := range []string{"jd-judge-a-cheap", "jd-judge-b-cheap", "jd-fix-agent-cheap"} {
+		agents[key] = map[string]any{"mode": "subagent"}
+	}
 
 	root := map[string]any{"agent": agents}
 	data, _ := json.MarshalIndent(root, "", "  ")
@@ -708,7 +871,7 @@ func buildSettingsWithProfiles(t *testing.T) (path string) {
 	return settingsPath
 }
 
-func TestRemoveProfileAgents_RemovesExactly11(t *testing.T) {
+func TestRemoveProfileAgents_RemovesProfileSDDAndJDAgents(t *testing.T) {
 	path := buildSettingsWithProfiles(t)
 
 	if err := RemoveProfileAgents(path, "cheap"); err != nil {
@@ -736,6 +899,11 @@ func TestRemoveProfileAgents_RemovesExactly11(t *testing.T) {
 	for key := range agentMap {
 		if strings.HasSuffix(key, "-cheap") {
 			t.Errorf("cheap key %q still present after removal", key)
+		}
+	}
+	for _, key := range []string{"jd-judge-a-cheap", "jd-judge-b-cheap", "jd-fix-agent-cheap"} {
+		if _, ok := agentMap[key]; ok {
+			t.Errorf("profile JD key %q still present after removal", key)
 		}
 	}
 

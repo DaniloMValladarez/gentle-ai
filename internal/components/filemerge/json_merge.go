@@ -48,6 +48,13 @@ func unmarshalJSONObject(raw []byte) (map[string]any, error) {
 	return object, nil
 }
 
+// UnmarshalJSONObject decodes a JSON object using the same JSONC normalization
+// accepted by MergeJSONObjects: comments are stripped and trailing commas are
+// removed before falling back to strict JSON decoding errors.
+func UnmarshalJSONObject(raw []byte) (map[string]any, error) {
+	return unmarshalJSONObject(raw)
+}
+
 func normalizeJSON(raw []byte) []byte {
 	withoutComments := stripJSONComments(raw)
 	return stripTrailingCommas(withoutComments)

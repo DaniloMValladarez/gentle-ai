@@ -1287,6 +1287,17 @@ func TestRunSyncDetectsExistingProfilesOnRegularSync(t *testing.T) {
 					ProviderID: "anthropic",
 					ModelID:    "claude-haiku-3-5-20241022",
 				},
+				PhaseAssignments: map[string]model.ModelAssignment{
+					"jd-judge-a": {
+						ProviderID: "anthropic",
+						ModelID:    "claude-opus-4-5",
+						Effort:     "high",
+					},
+					"jd-fix-agent": {
+						ProviderID: "anthropic",
+						ModelID:    "claude-sonnet-4-20250514",
+					},
+				},
 			},
 		},
 	}
@@ -1304,6 +1315,9 @@ func TestRunSyncDetectsExistingProfilesOnRegularSync(t *testing.T) {
 	}
 	if !strings.Contains(string(settingsData), `"sdd-orchestrator-test-profile"`) {
 		t.Fatalf("run1 did not create sdd-orchestrator-test-profile in opencode.json")
+	}
+	if !strings.Contains(string(settingsData), `"jd-judge-a-test-profile"`) || !strings.Contains(string(settingsData), `"jd-fix-agent-test-profile"`) {
+		t.Fatalf("run1 did not create profile-scoped JD agents in opencode.json")
 	}
 
 	// Run 2: normal sync (no explicit profiles) → DetectProfiles should find the
@@ -1335,6 +1349,12 @@ func TestRunSyncDetectsExistingProfilesOnRegularSync(t *testing.T) {
 	}
 	if !strings.Contains(string(settingsData2), `"sdd-orchestrator-test-profile"`) {
 		t.Errorf("run2 (regular sync): sdd-orchestrator-test-profile key should still be present after DetectProfiles re-sync")
+	}
+	if !strings.Contains(string(settingsData2), `"jd-judge-a-test-profile"`) || !strings.Contains(string(settingsData2), `"jd-fix-agent-test-profile"`) {
+		t.Errorf("run2 (regular sync): profile-scoped JD agents should still be present after DetectProfiles re-sync")
+	}
+	if !strings.Contains(string(settingsData2), `"jd-judge-a"`) || !strings.Contains(string(settingsData2), `"jd-judge-a-test-profile"`) {
+		t.Errorf("run2 (regular sync): profile orchestrator prompt should preserve JD delegation mapping after DetectProfiles re-sync")
 	}
 	_ = result2 // result2 may or may not be no-op depending on whether profile overlay is idempotent
 }
@@ -1935,6 +1955,38 @@ func TestParseSyncFlagsProfilePhaseAssignment(t *testing.T) {
 	}
 	if assign.ModelID != "claude-sonnet-4-20250514" {
 		t.Errorf("sdd-apply ModelID = %q, want %q", assign.ModelID, "claude-sonnet-4-20250514")
+	}
+}
+
+func TestParseSyncFlagsProfilePhaseJDAssignments(t *testing.T) {
+	flags, err := ParseSyncFlags([]string{
+		"--profile", "review:anthropic/claude-sonnet-4-20250514",
+		"--profile-phase", "review:jd-judge-a:anthropic/claude-opus-4-5",
+		"--profile-phase", "review:jd-judge-b:openai/gpt-5.1",
+		"--profile-phase", "review:jd-fix-agent:anthropic/claude-sonnet-4-20250514",
+	})
+	if err != nil {
+		t.Fatalf("ParseSyncFlags() error = %v", err)
+	}
+
+	if len(flags.Profiles) != 1 {
+		t.Fatalf("expected 1 profile, got %d", len(flags.Profiles))
+	}
+
+	assignments := flags.Profiles[0].PhaseAssignments
+	for _, phase := range []string{"jd-judge-a", "jd-judge-b", "jd-fix-agent"} {
+		if _, ok := assignments[phase]; !ok {
+			t.Fatalf("PhaseAssignments missing %q key; got %v", phase, assignments)
+		}
+	}
+	if got := assignments["jd-judge-a"].FullID(); got != "anthropic/claude-opus-4-5" {
+		t.Errorf("jd-judge-a model = %q, want %q", got, "anthropic/claude-opus-4-5")
+	}
+	if got := assignments["jd-judge-b"].FullID(); got != "openai/gpt-5.1" {
+		t.Errorf("jd-judge-b model = %q, want %q", got, "openai/gpt-5.1")
+	}
+	if got := assignments["jd-fix-agent"].FullID(); got != "anthropic/claude-sonnet-4-20250514" {
+		t.Errorf("jd-fix-agent model = %q, want %q", got, "anthropic/claude-sonnet-4-20250514")
 	}
 }
 

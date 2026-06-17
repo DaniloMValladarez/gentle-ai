@@ -63,7 +63,7 @@ func TestProfileLifecycle_FullCRUD(t *testing.T) {
 		t.Fatalf("GenerateProfileOverlay(): %v", err)
 	}
 
-	// Step 4: Merge overlay into opencode.json → verify 11 agent keys for "cheap".
+	// Step 4: Merge overlay into opencode.json → verify SDD agent keys for "cheap".
 	baseJSON, err := os.ReadFile(settingsPath)
 	if err != nil {
 		t.Fatalf("ReadFile(opencode.json): %v", err)
@@ -76,7 +76,9 @@ func TestProfileLifecycle_FullCRUD(t *testing.T) {
 		t.Fatalf("WriteFileAtomic(): %v", writeErr)
 	}
 
-	// Verify 11 agent keys for "cheap" profile.
+	// Verify SDD agent keys for "cheap" profile. ProfileAgentKeys also includes
+	// optional profile-scoped Judgment Day cleanup keys, which are generated only
+	// when the profile has JD assignments.
 	var root map[string]any
 	if err := json.Unmarshal(merged, &root); err != nil {
 		t.Fatalf("unmarshal merged: %v", err)
@@ -85,14 +87,14 @@ func TestProfileLifecycle_FullCRUD(t *testing.T) {
 	if !ok {
 		t.Fatal("merged JSON missing 'agent' map")
 	}
-	expectedCheapKeys := ProfileAgentKeys("cheap")
+	expectedCheapKeys := profileSDDKeysForTest("cheap")
 	for _, key := range expectedCheapKeys {
 		if _, exists := agentMap[key]; !exists {
 			t.Errorf("merged agent map missing key %q", key)
 		}
 	}
 	if len(expectedCheapKeys) != 11 {
-		t.Errorf("expected 11 cheap profile keys, got %d", len(expectedCheapKeys))
+		t.Errorf("expected 11 cheap SDD profile keys, got %d", len(expectedCheapKeys))
 	}
 
 	// Step 5: DetectProfiles → verify 1 profile detected with correct model.
@@ -188,6 +190,18 @@ func TestProfileLifecycle_FullCRUD(t *testing.T) {
 			t.Errorf("shared prompt file %q was deleted by RemoveProfileAgents — should NOT be: %v", path, statErr)
 		}
 	}
+}
+
+func profileSDDKeysForTest(name string) []string {
+	suffix := ""
+	if name != "" {
+		suffix = "-" + name
+	}
+	keys := []string{"sdd-orchestrator" + suffix}
+	for _, phase := range profilePhaseOrder {
+		keys = append(keys, phase+suffix)
+	}
+	return keys
 }
 
 // TestProfileLifecycle_TwoProfiles verifies create + detect + remove for two concurrent profiles.

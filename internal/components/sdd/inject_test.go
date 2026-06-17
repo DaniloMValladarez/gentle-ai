@@ -5182,6 +5182,137 @@ func TestInjectOpenCodeWithProfile_DefaultProfileSkipped(t *testing.T) {
 	}
 }
 
+func TestInjectOpenCodeWithProfile_RemovesStaleProfileJDAgents(t *testing.T) {
+	home := t.TempDir()
+	mockNoPackageManager(t)
+
+	profileWithJD := model.Profile{
+		Name:              "cheap",
+		OrchestratorModel: model.ModelAssignment{ProviderID: "anthropic", ModelID: "claude-haiku-3-5"},
+		PhaseAssignments: map[string]model.ModelAssignment{
+			"jd-judge-a": {ProviderID: "anthropic", ModelID: "claude-opus-4-5"},
+		},
+	}
+	if _, err := Inject(home, opencodeAdapter(), model.SDDModeMulti, InjectOptions{Profiles: []model.Profile{profileWithJD}}); err != nil {
+		t.Fatalf("Inject() with JD profile assignment error = %v", err)
+	}
+
+	profileWithoutJD := model.Profile{
+		Name:              "cheap",
+		OrchestratorModel: model.ModelAssignment{ProviderID: "anthropic", ModelID: "claude-haiku-3-5"},
+	}
+	if _, err := Inject(home, opencodeAdapter(), model.SDDModeMulti, InjectOptions{Profiles: []model.Profile{profileWithoutJD}}); err != nil {
+		t.Fatalf("Inject() after removing JD profile assignment error = %v", err)
+	}
+
+	settingsPath := filepath.Join(home, ".config", "opencode", "opencode.json")
+	content, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("ReadFile(opencode.json) error = %v", err)
+	}
+
+	var root map[string]any
+	if err := json.Unmarshal(content, &root); err != nil {
+		t.Fatalf("unmarshal opencode.json: %v", err)
+	}
+	agentMap := root["agent"].(map[string]any)
+	if _, exists := agentMap["jd-judge-a-cheap"]; exists {
+		t.Fatal("stale profile-scoped JD agent jd-judge-a-cheap survived sync after assignment removal")
+	}
+	if _, exists := agentMap["jd-judge-a"]; !exists {
+		t.Fatal("global JD agent jd-judge-a was removed; expected global/default fallback to remain")
+	}
+
+	profiles, err := DetectProfiles(settingsPath)
+	if err != nil {
+		t.Fatalf("DetectProfiles() error = %v", err)
+	}
+	if len(profiles) != 1 {
+		t.Fatalf("DetectProfiles() returned %d profiles, want 1", len(profiles))
+	}
+	if _, resurrected := profiles[0].PhaseAssignments["jd-judge-a"]; resurrected {
+		t.Fatalf("DetectProfiles() resurrected stale jd-judge-a assignment: %#v", profiles[0].PhaseAssignments["jd-judge-a"])
+	}
+}
+
+func TestInjectOpenCodeWithProfile_StaleJDCleanupAcceptsJSONCSettings(t *testing.T) {
+	home := t.TempDir()
+	mockNoPackageManager(t)
+
+	settingsPath := filepath.Join(home, ".config", "opencode", "opencode.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(opencode config): %v", err)
+	}
+	jsonc := `{
+  // Existing user comment that the merge path accepts.
+  "agent": {
+    "sdd-orchestrator-cheap": { "mode": "primary" },
+    "jd-judge-a-cheap": { "mode": "subagent", "model": "anthropic/claude-opus-4-5" },
+  },
+}
+`
+	if err := os.WriteFile(settingsPath, []byte(jsonc), 0o644); err != nil {
+		t.Fatalf("WriteFile(opencode.json): %v", err)
+	}
+
+	profileWithoutJD := model.Profile{
+		Name:              "cheap",
+		OrchestratorModel: model.ModelAssignment{ProviderID: "anthropic", ModelID: "claude-haiku-3-5"},
+	}
+	if _, err := Inject(home, opencodeAdapter(), model.SDDModeMulti, InjectOptions{Profiles: []model.Profile{profileWithoutJD}}); err != nil {
+		t.Fatalf("Inject() should accept JSONC opencode settings during stale JD cleanup: %v", err)
+	}
+
+	content, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("ReadFile(opencode.json): %v", err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(content, &root); err != nil {
+		t.Fatalf("opencode.json should be rewritten as normalized JSON: %v", err)
+	}
+	agentMap := root["agent"].(map[string]any)
+	if _, exists := agentMap["jd-judge-a-cheap"]; exists {
+		t.Fatal("stale profile-scoped JD agent survived JSONC-tolerant cleanup")
+	}
+	if _, exists := agentMap["sdd-orchestrator-cheap"]; !exists {
+		t.Fatal("profile orchestrator was removed during stale JD cleanup")
+	}
+}
+
+func TestInjectOpenCodeWithProfile_StaleJDCleanupDoesNotRejectMalformedSettings(t *testing.T) {
+	home := t.TempDir()
+	mockNoPackageManager(t)
+
+	settingsPath := filepath.Join(home, ".config", "opencode", "opencode.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(opencode config): %v", err)
+	}
+	if err := os.WriteFile(settingsPath, []byte(`not json`), 0o644); err != nil {
+		t.Fatalf("WriteFile(opencode.json): %v", err)
+	}
+
+	profileWithoutJD := model.Profile{
+		Name:              "cheap",
+		OrchestratorModel: model.ModelAssignment{ProviderID: "anthropic", ModelID: "claude-haiku-3-5"},
+	}
+	if _, err := Inject(home, opencodeAdapter(), model.SDDModeMulti, InjectOptions{Profiles: []model.Profile{profileWithoutJD}}); err != nil {
+		t.Fatalf("Inject() should preserve merge behavior for malformed opencode settings: %v", err)
+	}
+
+	content, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("ReadFile(opencode.json): %v", err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(content, &root); err != nil {
+		t.Fatalf("opencode.json should be recovered as valid JSON: %v", err)
+	}
+	if _, ok := root["agent"].(map[string]any)["sdd-orchestrator-cheap"]; !ok {
+		t.Fatal("profile orchestrator missing after malformed settings recovery")
+	}
+}
+
 // TestInjectOpenCodeWithTwoProfiles_BothOrchestratorsPresent verifies that
 // two named profiles both get their orchestrators injected and verified.
 func TestInjectOpenCodeWithTwoProfiles_BothOrchestratorsPresent(t *testing.T) {

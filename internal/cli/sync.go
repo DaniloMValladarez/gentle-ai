@@ -225,8 +225,9 @@ func parseProfilePhaseFlag(raw string) (name, phase string, assignment model.Mod
 	if phase == "" {
 		return "", "", model.ModelAssignment{}, fmt.Errorf("--profile-phase %q: phase must not be empty", raw)
 	}
-	// Validate that the phase is a known SDD phase name.
-	knownPhases := sdd.ProfilePhaseOrder()
+	// Validate that the phase is a known profile-configurable agent name.
+	// SDD profiles can configure both SDD phase agents and Judgment Day agents.
+	knownPhases := sdd.ProfileAssignmentPhaseOrder()
 	validPhase := false
 	for _, p := range knownPhases {
 		if p == phase {
