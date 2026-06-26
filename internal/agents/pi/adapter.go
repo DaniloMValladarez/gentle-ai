@@ -21,6 +21,7 @@ const (
 	piMCPAdapterDependency   = "pi-mcp-adapter"
 	piMCPAdapterVersion      = "2.6.0"
 	piMCPAdapterVersionRange = "^2.6.0"
+	piAppendSystemFile       = "APPEND_SYSTEM.md"
 	piEngramMCPConfigFile    = "mcp.json"
 	piSettingsFile           = "settings.json"
 	piNPMDirectory           = "npm"
@@ -71,7 +72,7 @@ func (a *Adapter) Agent() model.AgentID { return model.AgentPi }
 func (a *Adapter) Tier() model.SupportTier { return model.TierFull }
 
 func (a *Adapter) Detect(_ context.Context, homeDir string) (bool, string, string, bool, error) {
-	configPath := ConfigPath(homeDir)
+	configPath := AgentConfigPath(homeDir)
 	binaryPath, err := a.lookPath("pi")
 	installed := err == nil && binaryPath != ""
 
@@ -112,9 +113,11 @@ func (a *Adapter) engramInitCommand() []string {
 
 func (a *Adapter) GlobalConfigDir(homeDir string) string { return ConfigPath(homeDir) }
 
-func (a *Adapter) SystemPromptDir(string) string { return "" }
+func (a *Adapter) SystemPromptDir(homeDir string) string { return AgentConfigPath(homeDir) }
 
-func (a *Adapter) SystemPromptFile(string) string { return "" }
+func (a *Adapter) SystemPromptFile(homeDir string) string {
+	return filepath.Join(AgentConfigPath(homeDir), piAppendSystemFile)
+}
 
 func (a *Adapter) SkillsDir(string) string { return "" }
 
@@ -148,7 +151,7 @@ func (a *Adapter) EmbeddedSubAgentsDir() string { return "" }
 
 func (a *Adapter) SupportsSkills() bool { return false }
 
-func (a *Adapter) SupportsSystemPrompt() bool { return false }
+func (a *Adapter) SupportsSystemPrompt() bool { return true }
 
 func (a *Adapter) SupportsMCP() bool { return true }
 

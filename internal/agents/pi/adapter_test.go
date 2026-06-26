@@ -30,7 +30,7 @@ func TestAdapterIdentityAndCapabilities(t *testing.T) {
 		{"SupportsAutoInstall", a.SupportsAutoInstall(), true},
 		{"SupportsSkills", a.SupportsSkills(), false},
 		{"SupportsMCP", a.SupportsMCP(), true},
-		{"SupportsSystemPrompt", a.SupportsSystemPrompt(), false},
+		{"SupportsSystemPrompt", a.SupportsSystemPrompt(), true},
 		{"SupportsSlashCommands", a.SupportsSlashCommands(), false},
 		{"SupportsOutputStyles", a.SupportsOutputStyles(), false},
 		{"SupportsSubAgents", a.SupportsSubAgents(), false},
@@ -57,8 +57,8 @@ func TestAdapterPaths(t *testing.T) {
 		want string
 	}{
 		{"GlobalConfigDir", a.GlobalConfigDir(homeDir), piDir},
-		{"SystemPromptDir", a.SystemPromptDir(homeDir), ""},
-		{"SystemPromptFile", a.SystemPromptFile(homeDir), ""},
+		{"SystemPromptDir", a.SystemPromptDir(homeDir), piAgentDir},
+		{"SystemPromptFile", a.SystemPromptFile(homeDir), filepath.Join(piAgentDir, "APPEND_SYSTEM.md")},
 		{"SkillsDir", a.SkillsDir(homeDir), ""},
 		{"SettingsPath", a.SettingsPath(homeDir), filepath.Join(piAgentDir, "settings.json")},
 		{"CommandsDir", a.CommandsDir(homeDir), ""},
@@ -79,7 +79,7 @@ func TestAdapterPaths(t *testing.T) {
 
 func TestAdapterDetectUsesPiBinaryAndConfigPath(t *testing.T) {
 	homeDir := t.TempDir()
-	configDir := filepath.Join(homeDir, ".pi")
+	configDir := filepath.Join(homeDir, ".pi", "agent")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -131,8 +131,8 @@ func TestAdapterDetectMissingPiBinary(t *testing.T) {
 	if binaryPath != "" {
 		t.Fatalf("Detect() binaryPath = %q, want empty", binaryPath)
 	}
-	if configPath != filepath.Join(homeDir, ".pi") {
-		t.Fatalf("Detect() configPath = %q, want ~/.pi under home", configPath)
+	if configPath != filepath.Join(homeDir, ".pi", "agent") {
+		t.Fatalf("Detect() configPath = %q, want ~/.pi/agent under home", configPath)
 	}
 	if configFound {
 		t.Fatalf("Detect() configFound = true, want false")

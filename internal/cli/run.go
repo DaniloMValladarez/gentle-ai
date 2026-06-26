@@ -18,6 +18,7 @@ import (
 	"github.com/gentleman-programming/gentle-ai/internal/agents/kimi"
 	"github.com/gentleman-programming/gentle-ai/internal/assets"
 	"github.com/gentleman-programming/gentle-ai/internal/backup"
+	"github.com/gentleman-programming/gentle-ai/internal/components/communitytool"
 	"github.com/gentleman-programming/gentle-ai/internal/components/engram"
 	"github.com/gentleman-programming/gentle-ai/internal/components/gga"
 	"github.com/gentleman-programming/gentle-ai/internal/components/mcp"
@@ -48,14 +49,15 @@ type InstallResult struct {
 }
 
 var (
-	osUserHomeDir       = os.UserHomeDir
-	osSetenv            = os.Setenv
-	osStat              = os.Stat
-	runCommand          = executeCommand
-	cmdLookPath         = exec.LookPath
-	streamCommandOutput = true
-	goEnv               = defaultGoEnv
-	pathEnvEntries      = func(profile system.PlatformProfile) []string {
+	osUserHomeDir        = os.UserHomeDir
+	osSetenv             = os.Setenv
+	osStat               = os.Stat
+	runCommand           = executeCommand
+	cmdLookPath          = exec.LookPath
+	streamCommandOutput  = true
+	goEnv                = defaultGoEnv
+	installCommunityTool = communitytool.Install
+	pathEnvEntries       = func(profile system.PlatformProfile) []string {
 		return splitPathForOS(os.Getenv("PATH"), profile.OS)
 	}
 	addUserPath         = system.AddToUserPath
@@ -456,7 +458,7 @@ func (r *installRuntime) stagePlan() pipeline.StagePlan {
 		},
 	}
 
-	apply := make([]pipeline.Step, 0, len(r.resolved.Agents)+len(r.resolved.OrderedComponents)+1)
+	apply := make([]pipeline.Step, 0, len(r.resolved.Agents)+len(r.selection.CommunityTools)+len(r.resolved.OrderedComponents)+1)
 	apply = append(apply, rollbackRestoreStep{id: "apply:rollback-restore", state: r.state})
 
 	// Before installing components, ensure modular agents have their system prompt hub.
@@ -476,6 +478,10 @@ func (r *installRuntime) stagePlan() pipeline.StagePlan {
 		for _, plugin := range r.selection.OpenCodePlugins {
 			apply = append(apply, openCodePluginInstallStep{id: "opencode-plugin:" + string(plugin), plugin: plugin, homeDir: r.homeDir})
 		}
+	}
+
+	for _, tool := range r.selection.CommunityTools {
+		apply = append(apply, communityToolInstallStep{id: "community-tool:" + string(tool), tool: tool, workspaceDir: r.workspaceDir})
 	}
 
 	for _, component := range r.resolved.OrderedComponents {
@@ -670,6 +676,22 @@ type componentApplyStep struct {
 	selection    model.Selection
 	profile      system.PlatformProfile
 	channel      InstallChannel
+}
+
+type communityToolInstallStep struct {
+	id           string
+	tool         model.CommunityToolID
+	workspaceDir string
+}
+
+func (s communityToolInstallStep) ID() string { return s.id }
+
+func (s communityToolInstallStep) Run() error {
+	_, err := installCommunityTool(s.tool, s.workspaceDir, communitytool.RunnerFunc(runCommand))
+	if err != nil {
+		return fmt.Errorf("install community tool %q: %w", s.tool, err)
+	}
+	return nil
 }
 
 func (s componentApplyStep) ID() string {

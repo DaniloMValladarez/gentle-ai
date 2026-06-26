@@ -19,6 +19,16 @@ type Selection struct {
 	CodexPhaseModelAssignments  map[string]string                // key = phase name; value = model id (Custom per-phase picker only)
 	Profiles                    []Profile                        // named SDD profiles to generate/update during sync
 	OpenCodePlugins             []OpenCodeCommunityPluginID      // optional community OpenCode TUI plugins
+	CommunityTools              []CommunityToolID                // optional cross-agent community tools/plugins
+}
+
+func (s Selection) HasCommunityTool(tool CommunityToolID) bool {
+	for _, current := range s.CommunityTools {
+		if current == tool {
+			return true
+		}
+	}
+	return false
 }
 
 func (s Selection) HasAgent(agent AgentID) bool {

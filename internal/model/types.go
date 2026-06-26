@@ -175,6 +175,12 @@ const (
 	OpenCodePluginGentleLogo         OpenCodeCommunityPluginID = "gentle-logo"
 )
 
+type CommunityToolID string
+
+const (
+	CommunityToolCodeGraph CommunityToolID = "codegraph"
+)
+
 // Profile represents a named SDD orchestrator configuration with model assignments.
 // The default profile (Name="" or Name="default") maps to the base sdd-orchestrator.
 // Named profiles generate sdd-orchestrator-{Name} + suffixed sub-agents.
@@ -226,7 +232,7 @@ type TriggerWhen struct {
 type TriggerBinding struct {
 	On     TriggerEvent `json:"on"`
 	When   TriggerWhen  `json:"when"`
-	Run    []string     `json:"run"`              // agent names: review-risk, judgment-day, etc.
+	Run    []string     `json:"run"` // agent names: review-risk, judgment-day, etc.
 	Mode   TriggerMode  `json:"mode"`
 	Reason string       `json:"reason,omitempty"` // OPTIONAL — token-budget/why note; only optional binding field
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/gentleman-programming/gentle-ai/internal/agentbuilder"
 	"github.com/gentleman-programming/gentle-ai/internal/backup"
 	"github.com/gentleman-programming/gentle-ai/internal/catalog"
+	"github.com/gentleman-programming/gentle-ai/internal/components/communitytool"
 	"github.com/gentleman-programming/gentle-ai/internal/components/opencodeplugin"
 	"github.com/gentleman-programming/gentle-ai/internal/components/sdd"
 	componentuninstall "github.com/gentleman-programming/gentle-ai/internal/components/uninstall"
@@ -87,6 +88,8 @@ var osGetwdFn = os.Getwd
 var osExecutableFn = os.Executable
 var osRemoveFn = os.Remove
 var execCommandFn = exec.Command
+var communityToolInstallFn = communitytool.Install
+var communityToolStatusFn = communitytool.DetectStatus
 
 // readCurrentAssignmentsFn is a package-level variable so tests can override
 // how current model assignments are read from opencode.json. It wraps
@@ -255,6 +258,16 @@ type OpenCodePluginRegistrationDoneMsg struct {
 	Err     error
 }
 
+type CommunityToolInstallationDoneMsg struct {
+	Results []communitytool.Result
+	Err     error
+}
+
+type CommunityToolStatusLoadedMsg struct {
+	Statuses []communitytool.Status
+	Err      error
+}
+
 // AgentBuilderState holds all transient state for the agent-builder TUI flow.
 type AgentBuilderState struct {
 	AvailableEngines []model.AgentID
@@ -326,6 +339,9 @@ const (
 	ScreenStrictTDD
 	ScreenOpenCodePlugins
 	ScreenOpenCodePluginResult
+	ScreenCommunityTools
+	ScreenCommunityToolInstalling
+	ScreenCommunityToolResult
 	ScreenDependencyTree
 	ScreenSkillPicker
 	ScreenReview
@@ -544,10 +560,18 @@ type Model struct {
 	// OpenCodePluginsStandalone is true when ScreenOpenCodePlugins was opened
 	// from the main menu shortcut instead of the full installation flow.
 	OpenCodePluginsStandalone bool
+	InstallFlowActive         bool
 
 	// OpenCodePluginRegistrationResults and Err hold the dedicated shortcut result.
 	OpenCodePluginRegistrationResults []opencodeplugin.Result
 	OpenCodePluginRegistrationErr     error
+
+	CommunityToolsStandalone   bool
+	CommunityToolStatusLoading bool
+	CommunityToolStatuses      []communitytool.Status
+	CommunityToolStatusErr     error
+	CommunityToolResults       []communitytool.Result
+	CommunityToolErr           error
 }
 
 // NewModel constructs the initial TUI model for the given detection result.
@@ -764,6 +788,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.OpenCodePluginRegistrationResults = msg.Results
 		m.OpenCodePluginRegistrationErr = msg.Err
 		m.setScreen(ScreenOpenCodePluginResult)
+		return m, nil
+	case CommunityToolInstallationDoneMsg:
+		m.OperationRunning = false
+		m.CommunityToolResults = msg.Results
+		m.CommunityToolErr = msg.Err
+		m.CommunityToolStatuses = communityToolStatusesFromResults(msg.Results, m.CommunityToolStatuses)
+		m.setScreen(ScreenCommunityToolResult)
+		return m, nil
+	case CommunityToolStatusLoadedMsg:
+		m.CommunityToolStatusLoading = false
+		m.CommunityToolStatuses = msg.Statuses
+		m.CommunityToolStatusErr = msg.Err
 		return m, nil
 	case StepProgressMsg:
 		return m.handleStepProgress(msg)
@@ -1023,6 +1059,12 @@ func (m Model) View() string {
 		return screens.RenderOpenCodePlugins(m.Selection.OpenCodePlugins, m.Cursor)
 	case ScreenOpenCodePluginResult:
 		return screens.RenderOpenCodePluginResult(m.OpenCodePluginRegistrationResults, m.OpenCodePluginRegistrationErr)
+	case ScreenCommunityTools:
+		return screens.RenderCommunityTools(m.Selection.CommunityTools, m.Cursor, m.CommunityToolStatuses, m.CommunityToolStatusLoading, m.CommunityToolStatusErr)
+	case ScreenCommunityToolInstalling:
+		return screens.RenderCommunityToolInstalling(m.Selection.CommunityTools, screens.SpinnerChar(m.SpinnerFrame), m.CommunityToolStatuses)
+	case ScreenCommunityToolResult:
+		return screens.RenderCommunityToolResult(m.CommunityToolResults, m.CommunityToolErr)
 	case ScreenModelPicker:
 		return screens.RenderModelPicker(m.Selection.ModelAssignments, m.ModelPicker, m.Cursor)
 	case ScreenDependencyTree:
@@ -1138,10 +1180,7 @@ func (m Model) handleKeyPress(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m = m.withResetSyncState()
 					m.setScreen(ScreenSync)
 				} else if next, ok := m.pickerNextScreen(); ok {
-					if next == ScreenDependencyTree {
-						m.buildDependencyPlan()
-					}
-					m.applyPickerEntry(next)
+					m.advanceToNextPickerScreen(next)
 				}
 			}
 			return m, nil
@@ -1166,10 +1205,7 @@ func (m Model) handleKeyPress(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m = m.withResetSyncState()
 					m.setScreen(ScreenSync)
 				} else if next, ok := m.pickerNextScreen(); ok {
-					if next == ScreenDependencyTree {
-						m.buildDependencyPlan()
-					}
-					m.applyPickerEntry(next)
+					m.advanceToNextPickerScreen(next)
 				}
 			}
 			return m, nil
@@ -1226,10 +1262,7 @@ func (m Model) handleKeyPress(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m = m.withResetSyncState()
 					m.setScreen(ScreenSync)
 				} else if next, ok := m.pickerNextScreen(); ok {
-					if next == ScreenDependencyTree {
-						m.buildDependencyPlan()
-					}
-					m.applyPickerEntry(next)
+					m.advanceToNextPickerScreen(next)
 				}
 			}
 			return m, nil
@@ -1344,7 +1377,7 @@ func (m Model) handleKeyPress(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "esc":
 		// Don't allow going back while pipeline is running.
-		if m.Screen == ScreenInstalling && m.pipelineRunning {
+		if (m.Screen == ScreenInstalling && m.pipelineRunning) || m.Screen == ScreenCommunityToolInstalling {
 			return m, nil
 		}
 		if _, ok := m.GentleAIUpgradeVersion(); ok {
@@ -1373,6 +1406,8 @@ func (m Model) handleKeyPress(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.toggleCurrentSkill()
 		case ScreenOpenCodePlugins:
 			m.toggleCurrentOpenCodePlugin()
+		case ScreenCommunityTools:
+			m.toggleCurrentCommunityTool()
 		}
 		return m, nil
 	case "r":
@@ -1447,6 +1482,7 @@ func (m Model) confirmSelection() (tea.Model, tea.Cmd) {
 	case ScreenWelcome:
 		switch m.Cursor {
 		case 0:
+			m.InstallFlowActive = true
 			m.setScreen(ScreenDetection)
 		case 1:
 			m = m.withResetOperationState()
@@ -1510,6 +1546,19 @@ func (m Model) confirmSelection() (tea.Model, tea.Cmd) {
 			if m.Cursor == next {
 				m.setScreen(ScreenUninstallMode)
 				return m, nil
+			}
+			next++
+
+			if m.Cursor == next {
+				m.CommunityToolsStandalone = true
+				m.CommunityToolResults = nil
+				m.CommunityToolErr = nil
+				m.CommunityToolStatuses = nil
+				m.CommunityToolStatusErr = nil
+				m.CommunityToolStatusLoading = true
+				m.Selection.CommunityTools = nil
+				m.setScreen(ScreenCommunityTools)
+				return m, m.startCommunityToolStatusDetection()
 			}
 			next++
 
@@ -1846,10 +1895,14 @@ func (m Model) confirmSelection() (tea.Model, tea.Cmd) {
 				m.applyPickerEntry(next)
 				return m, nil
 			}
-			// No picker/SDDMode/StrictTDD applies. OpenCodePlugins is NOT in the
-			// slice (its predicate reads m.Screen); OpenCode without SDD still
-			// offers the plugins screen before the dependency tree. The guard must
-			// stay AFTER pickerNextScreen so OpenCode+SDD reaches SDDMode first.
+			// No picker/SDDMode/StrictTDD applies. CommunityTools and OpenCodePlugins
+			// are NOT in the slice (OpenCode's predicate reads m.Screen); optional
+			// setup screens are offered before the dependency tree. The community
+			// tools guard must stay AFTER pickerNextScreen so SDD reaches SDDMode first.
+			if m.shouldShowCommunityToolsScreen() {
+				m.setScreen(ScreenCommunityTools)
+				return m, nil
+			}
 			if m.shouldShowOpenCodePluginsScreen() {
 				m.setScreen(ScreenOpenCodePlugins)
 				return m, nil
@@ -1915,10 +1968,7 @@ func (m Model) confirmSelection() (tea.Model, tea.Cmd) {
 			m.Selection.ModelAssignments = nil
 			// Use pickerNextScreen to advance through the remaining slice.
 			if next, ok := m.pickerNextScreen(); ok {
-				if next == ScreenDependencyTree {
-					m.buildDependencyPlan()
-				}
-				m.applyPickerEntry(next)
+				m.advanceToNextPickerScreen(next)
 			}
 			return m, nil
 		}
@@ -1952,8 +2002,14 @@ func (m Model) confirmSelection() (tea.Model, tea.Cmd) {
 					m.setScreen(ScreenReview)
 				}
 			} else {
-				m.buildDependencyPlan()
-				m.setScreen(ScreenDependencyTree)
+				if m.shouldShowCommunityToolsScreen() {
+					m.setScreen(ScreenCommunityTools)
+				} else if m.shouldShowOpenCodePluginsScreen() {
+					m.setScreen(ScreenOpenCodePlugins)
+				} else {
+					m.buildDependencyPlan()
+					m.setScreen(ScreenDependencyTree)
+				}
 			}
 			return m, nil
 		}
@@ -1986,10 +2042,7 @@ func (m Model) confirmSelection() (tea.Model, tea.Cmd) {
 			}
 			// Continue → advance to next screen in the picker slice.
 			if next, ok := m.pickerNextScreen(); ok {
-				if next == ScreenDependencyTree {
-					m.buildDependencyPlan()
-				}
-				m.applyPickerEntry(next)
+				m.advanceToNextPickerScreen(next)
 			}
 			return m, nil
 		}
@@ -2007,7 +2060,10 @@ func (m Model) confirmSelection() (tea.Model, tea.Cmd) {
 		if m.Cursor < len(options) {
 			// Enable is index 0, Disable is index 1.
 			m.Selection.StrictTDD = (m.Cursor == screens.StrictTDDOptionEnable)
-			if m.shouldShowOpenCodePluginsScreen() {
+			if m.shouldShowCommunityToolsScreen() {
+				// Early-return guard: CommunityTools is outside the picker slice.
+				m.setScreen(ScreenCommunityTools)
+			} else if m.shouldShowOpenCodePluginsScreen() {
 				// Early-return guard: OpenCodePlugins is outside the picker slice.
 				m.setScreen(ScreenOpenCodePlugins)
 			} else if m.Selection.Preset == model.PresetCustom {
@@ -2043,6 +2099,18 @@ func (m Model) confirmSelection() (tea.Model, tea.Cmd) {
 		m.OpenCodePluginRegistrationErr = nil
 		m.setScreen(ScreenWelcome)
 		return m, nil
+	case ScreenCommunityTools:
+		return m.confirmCommunityTools()
+	case ScreenCommunityToolResult:
+		m.CommunityToolsStandalone = false
+		m.Selection.CommunityTools = nil
+		m.CommunityToolStatuses = nil
+		m.CommunityToolStatusErr = nil
+		m.CommunityToolStatusLoading = false
+		m.CommunityToolResults = nil
+		m.CommunityToolErr = nil
+		m.setScreen(ScreenWelcome)
+		return m, nil
 	case ScreenDependencyTree:
 		if m.Selection.Preset == model.PresetCustom {
 			allComps := screens.AllComponents()
@@ -2059,7 +2127,11 @@ func (m Model) confirmSelection() (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				// No slice member after DependencyTree (no picker agents selected):
-				// check for OpenCodePlugins guard, SkillPicker, or fall to Review.
+				// check for CommunityTools guard, SkillPicker, or fall to Review.
+				if m.shouldShowCommunityToolsScreen() {
+					m.setScreen(ScreenCommunityTools)
+					return m, nil
+				}
 				if m.shouldShowOpenCodePluginsScreen() {
 					m.setScreen(ScreenOpenCodePlugins)
 					return m, nil
@@ -2084,15 +2156,18 @@ func (m Model) confirmSelection() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Non-custom Back: mirrors goBack (Esc) — isPiOnlyAgents early check,
-		// then OpenCodePlugins guard (outside the slice), then pickerPreviousScreen.
+		// then optional setup guards (outside the slice), then pickerPreviousScreen.
 		// INV-2: Enter-on-Back and Esc must produce identical results.
 		if isPiOnlyAgents(m.Selection.Agents) {
 			m.setScreen(ScreenAgents)
 		} else if m.shouldShowOpenCodePluginsScreen() {
-			// OpenCodePlugins sits between the picker chain and DependencyTree in
-			// the actual flow but is NOT in pickerFlowSlice. Check it first so
-			// Enter-on-Back matches Esc behavior (INV-2).
+			// OpenCodePlugins sits between CommunityTools and DependencyTree.
 			m.setScreen(ScreenOpenCodePlugins)
+		} else if m.shouldShowCommunityToolsScreen() {
+			// CommunityTools sits between the picker chain and DependencyTree in
+			// the actual flow but is NOT in pickerFlowSlice. Check it so
+			// Enter-on-Back matches Esc behavior (INV-2).
+			m.setScreen(ScreenCommunityTools)
 		} else if prev, ok := m.pickerPreviousScreen(); ok {
 			// No OpenCode; step back through the picker slice.
 			m.applyPickerEntry(prev)
@@ -2316,8 +2391,8 @@ func (m Model) startInstalling() (tea.Model, tea.Cmd) {
 	m.setScreen(ScreenInstalling)
 	m.SpinnerFrame = 0
 
-	// Build progress labels from the resolved plan.
-	labels := buildProgressLabels(m.DependencyPlan)
+	// Build progress labels from the resolved plan and selected tools.
+	labels := buildProgressLabels(m.DependencyPlan, m.Selection.CommunityTools)
 	if len(labels) == 0 {
 		// Fallback labels when the plan is empty (dev/test).
 		labels = []string{
@@ -2521,6 +2596,82 @@ func (m Model) startOpenCodePluginRegistration() tea.Cmd {
 	}
 }
 
+func (m Model) startCommunityToolInstallation() tea.Cmd {
+	tools := append([]model.CommunityToolID(nil), m.Selection.CommunityTools...)
+	workspaceDir, _ := osGetwdFn()
+	runner := communitytool.RunnerFunc(runCommunityToolCommand)
+	return func() tea.Msg {
+		results := make([]communitytool.Result, 0, len(tools))
+		for _, tool := range tools {
+			result, err := communityToolInstallFn(tool, workspaceDir, runner)
+			if err != nil {
+				if hasCommunityToolResultContext(result) {
+					results = append(results, result)
+				}
+				return CommunityToolInstallationDoneMsg{Results: results, Err: err}
+			}
+			results = append(results, result)
+		}
+		return CommunityToolInstallationDoneMsg{Results: results}
+	}
+}
+
+func (m Model) startCommunityToolStatusDetection() tea.Cmd {
+	tools := []model.CommunityToolID{model.CommunityToolCodeGraph}
+	home := homeDir()
+	detector := communitytool.DetectorFunc(func(name string) (string, error) {
+		path, err := exec.LookPath(name)
+		return path, err
+	})
+	return func() tea.Msg {
+		statuses := make([]communitytool.Status, 0, len(tools))
+		for _, tool := range tools {
+			statuses = append(statuses, communityToolStatusFn(tool, home, detector))
+		}
+		return CommunityToolStatusLoadedMsg{Statuses: statuses}
+	}
+}
+
+func communityToolStatusesFromResults(results []communitytool.Result, fallback []communitytool.Status) []communitytool.Status {
+	if len(results) == 0 {
+		return fallback
+	}
+	statuses := make([]communitytool.Status, 0, len(results))
+	for _, result := range results {
+		if result.StatusAfter != nil {
+			statuses = append(statuses, *result.StatusAfter)
+			continue
+		}
+		if result.StatusBefore != nil {
+			statuses = append(statuses, *result.StatusBefore)
+		}
+	}
+	if len(statuses) == 0 {
+		return fallback
+	}
+	return statuses
+}
+
+func hasCommunityToolResultContext(result communitytool.Result) bool {
+	return result.Tool != "" || len(result.CommandsRun) > 0 || len(result.ManualActions) > 0
+}
+
+func runCommunityToolCommand(name string, args ...string) error {
+	return executeExternalCommand(execCommandFn, name, args...)
+}
+
+func executeExternalCommand(commandFn func(string, ...string) *exec.Cmd, name string, args ...string) error {
+	cmd := commandFn(name, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if len(output) > 0 {
+			return fmt.Errorf("%w\noutput:\n%s", err, strings.TrimSpace(string(output)))
+		}
+		return err
+	}
+	return nil
+}
+
 func (m Model) startUninstall() tea.Cmd {
 	uninstallFn := m.UninstallFn
 	uninstallWithProfilesFn := m.UninstallWithProfilesFn
@@ -2713,8 +2864,8 @@ func (m Model) restoreBackup(manifest backup.Manifest) (tea.Model, tea.Cmd) {
 
 // buildProgressLabels creates step labels from the resolved plan that match
 // the step IDs the pipeline will produce.
-func buildProgressLabels(resolved planner.ResolvedPlan) []string {
-	labels := make([]string, 0, 2+len(resolved.Agents)+len(resolved.OrderedComponents)+1)
+func buildProgressLabels(resolved planner.ResolvedPlan, communityTools []model.CommunityToolID) []string {
+	labels := make([]string, 0, 3+len(resolved.Agents)+len(communityTools)+len(resolved.OrderedComponents))
 
 	labels = append(labels, "prepare:check-dependencies")
 	labels = append(labels, "prepare:backup-snapshot")
@@ -2722,6 +2873,10 @@ func buildProgressLabels(resolved planner.ResolvedPlan) []string {
 
 	for _, agent := range resolved.Agents {
 		labels = append(labels, "agent:"+string(agent))
+	}
+
+	for _, tool := range communityTools {
+		labels = append(labels, "community-tool:"+string(tool))
 	}
 
 	for _, component := range resolved.OrderedComponents {
@@ -2754,6 +2909,15 @@ func (m Model) goBack() Model {
 		m.Selection.OpenCodePlugins = nil
 		m.OpenCodePluginRegistrationResults = nil
 		m.OpenCodePluginRegistrationErr = nil
+		m.setScreen(ScreenWelcome)
+		return m
+	}
+
+	if m.Screen == ScreenCommunityToolResult {
+		m.CommunityToolsStandalone = false
+		m.Selection.CommunityTools = nil
+		m.CommunityToolResults = nil
+		m.CommunityToolErr = nil
 		m.setScreen(ScreenWelcome)
 		return m
 	}
@@ -2848,8 +3012,8 @@ func (m Model) goBack() Model {
 		return m
 	}
 
-	// Non-custom DependencyTree Esc: isPiOnlyAgents early check, then
-	// OpenCodePlugins guard (outside the slice), then pickerPreviousScreen.
+	// Non-custom DependencyTree Esc: isPiOnlyAgents early check, then optional
+	// setup guards (outside the slice), then pickerPreviousScreen.
 	// INV-2: Esc and Enter-on-Back must produce identical results.
 	if m.Screen == ScreenDependencyTree && m.Selection.Preset != model.PresetCustom {
 		if isPiOnlyAgents(m.Selection.Agents) {
@@ -2857,9 +3021,14 @@ func (m Model) goBack() Model {
 			return m
 		}
 		if m.shouldShowOpenCodePluginsScreen() {
-			// OpenCodePlugins sits between the picker chain and DependencyTree but
-			// is NOT in pickerFlowSlice; check it first so Esc matches Enter-on-Back.
+			// OpenCodePlugins sits between CommunityTools and DependencyTree.
 			m.setScreen(ScreenOpenCodePlugins)
+			return m
+		}
+		if m.shouldShowCommunityToolsScreen() {
+			// CommunityTools sits between the picker chain and DependencyTree but
+			// is NOT in pickerFlowSlice; check it so Esc matches Enter-on-Back.
+			m.setScreen(ScreenCommunityTools)
 			return m
 		}
 		if prev, ok := m.pickerPreviousScreen(); ok {
@@ -2882,6 +3051,10 @@ func (m Model) goBack() Model {
 
 	if m.Screen == ScreenOpenCodePlugins {
 		return m.goBackFromOpenCodePlugins()
+	}
+
+	if m.Screen == ScreenCommunityTools {
+		return m.goBackFromCommunityTools()
 	}
 
 	if m.Screen == ScreenSDDMode {
@@ -3102,6 +3275,12 @@ func (m Model) optionCount() int {
 	case ScreenOpenCodePlugins:
 		return screens.OpenCodePluginsOptionCount()
 	case ScreenOpenCodePluginResult:
+		return 1
+	case ScreenCommunityTools:
+		return screens.CommunityToolsOptionCount()
+	case ScreenCommunityToolInstalling:
+		return 0
+	case ScreenCommunityToolResult:
 		return 1
 	case ScreenModelPicker:
 		if len(m.ModelPicker.AvailableIDs) == 0 {
@@ -3328,6 +3507,107 @@ func (m *Model) toggleCurrentOpenCodePlugin() {
 	m.Selection.OpenCodePlugins = append(m.Selection.OpenCodePlugins, id)
 }
 
+func (m *Model) toggleCurrentCommunityTool() {
+	defs := communityToolDefinitions()
+	if m.Cursor%2 != 0 || m.Cursor/2 >= len(defs) {
+		return
+	}
+	id := defs[m.Cursor/2].ID
+	for idx, selected := range m.Selection.CommunityTools {
+		if selected == id {
+			m.Selection.CommunityTools = append(m.Selection.CommunityTools[:idx], m.Selection.CommunityTools[idx+1:]...)
+			return
+		}
+	}
+	m.Selection.CommunityTools = append(m.Selection.CommunityTools, id)
+}
+
+func (m Model) confirmCommunityTools() (tea.Model, tea.Cmd) {
+	defs := communityToolDefinitions()
+	toolRows := len(defs) * 2
+	switch {
+	case m.Cursor < toolRows && m.Cursor%2 == 0:
+		m.toggleCurrentCommunityTool()
+		return m, nil
+	case m.Cursor < toolRows && m.Cursor%2 == 1:
+		return m, openBrowserCmd(defs[m.Cursor/2].RepoURL)
+	case m.Cursor == toolRows:
+		if m.CommunityToolsStandalone {
+			m.CommunityToolResults = nil
+			m.CommunityToolErr = nil
+			m.OperationRunning = len(m.Selection.CommunityTools) > 0
+			if len(m.Selection.CommunityTools) == 0 {
+				m.setScreen(ScreenCommunityToolResult)
+				return m, nil
+			}
+			m.setScreen(ScreenCommunityToolInstalling)
+			return m, tea.Batch(m.startCommunityToolInstallation(), tickCmd())
+		}
+		return m.continueAfterCommunityTools(), nil
+	default:
+		return m.goBackFromCommunityTools(), nil
+	}
+}
+
+func (m Model) continueAfterCommunityTools() Model {
+	if m.shouldShowOpenCodePluginsScreen() {
+		m.setScreen(ScreenOpenCodePlugins)
+		return m
+	}
+	if m.Selection.Preset == model.PresetCustom {
+		if m.shouldShowSkillPickerScreen() {
+			if len(m.SkillPicker) == 0 {
+				m.initSkillPicker()
+			}
+			m.setScreen(ScreenSkillPicker)
+		} else {
+			m.Review = planner.BuildReviewPayload(m.Selection, m.DependencyPlan)
+			m.setScreen(ScreenReview)
+		}
+		return m
+	}
+	m.buildDependencyPlan()
+	m.setScreen(ScreenDependencyTree)
+	return m
+}
+
+func (m Model) goBackFromCommunityTools() Model {
+	if m.CommunityToolsStandalone {
+		m.CommunityToolsStandalone = false
+		m.Selection.CommunityTools = nil
+		m.CommunityToolResults = nil
+		m.CommunityToolErr = nil
+		m.setScreen(ScreenWelcome)
+		return m
+	}
+	if m.shouldShowStrictTDDScreen() {
+		m.setScreen(ScreenStrictTDD)
+		return m
+	}
+	if m.shouldShowSDDModeScreen() {
+		m.setScreen(ScreenSDDMode)
+		return m
+	}
+	if m.shouldShowCodexModelPickerScreen() {
+		m.setScreen(ScreenCodexModelPicker)
+		return m
+	}
+	if m.shouldShowKiroModelPickerScreen() {
+		m.setScreen(ScreenKiroModelPicker)
+		return m
+	}
+	if m.shouldShowClaudeModelPickerScreen() {
+		m.setScreen(ScreenClaudeModelPicker)
+		return m
+	}
+	if m.Selection.Preset == model.PresetCustom {
+		m.setScreen(ScreenDependencyTree)
+		return m
+	}
+	m.setScreen(ScreenPreset)
+	return m
+}
+
 func (m Model) confirmOpenCodePlugins() (tea.Model, tea.Cmd) {
 	defs := opencodepluginDefinitions()
 	pluginRows := len(defs) * 2
@@ -3391,6 +3671,10 @@ func (m Model) goBackFromOpenCodePlugins() Model {
 		return m
 	}
 
+	if m.shouldShowCommunityToolsScreen() {
+		m.setScreen(ScreenCommunityTools)
+		return m
+	}
 	if m.shouldShowStrictTDDScreen() {
 		m.setScreen(ScreenStrictTDD)
 		return m
@@ -3405,6 +3689,10 @@ func (m Model) goBackFromOpenCodePlugins() Model {
 
 func opencodepluginDefinitions() []model.OpenCodeCommunityPluginID {
 	return []model.OpenCodeCommunityPluginID{model.OpenCodePluginSubAgentStatusline, model.OpenCodePluginSDDEngramManage}
+}
+
+func communityToolDefinitions() []communitytool.Definition {
+	return communitytool.Definitions()
 }
 
 func opencodepluginRepoURLs() []string {
@@ -3455,6 +3743,10 @@ func (m Model) shouldShowOpenCodePluginsScreen() bool {
 	}
 
 	return true
+}
+
+func (m Model) shouldShowCommunityToolsScreen() bool {
+	return m.InstallFlowActive && !m.CommunityToolsStandalone
 }
 
 func (m *Model) buildDependencyPlan() {
@@ -3707,6 +3999,21 @@ func (m Model) pickerPreviousScreen() (Screen, bool) {
 		}
 	}
 	return 0, false
+}
+
+func (m *Model) advanceToNextPickerScreen(next Screen) {
+	if next == ScreenDependencyTree && m.shouldShowCommunityToolsScreen() {
+		m.setScreen(ScreenCommunityTools)
+		return
+	}
+	if next == ScreenDependencyTree && m.shouldShowOpenCodePluginsScreen() {
+		m.setScreen(ScreenOpenCodePlugins)
+		return
+	}
+	if next == ScreenDependencyTree {
+		m.buildDependencyPlan()
+	}
+	m.applyPickerEntry(next)
 }
 
 // applyPickerEntry initializes the target picker's state and transitions to it.
