@@ -328,20 +328,38 @@ func TestRunArgsDispatchesNativeReviewOperationsBeforePlatformValidation(t *test
 	ensureCurrentOSSupported = func() error { return fmt.Errorf("unsupported platform") }
 
 	for _, test := range []struct {
-		command string
-		want    string
+		command    string
+		want       string
+		wantOutput string
 	}{
 		{command: "review-start", want: "review-start requires --cwd, --lineage, and --policy-file"},
 		{command: "review-resume", want: "review-resume requires --cwd and --lineage"},
 		{command: "review-bundle-export", want: "review-bundle-export requires --cwd, --lineage, and --out"},
 		{command: "review-bundle-import", want: "review-bundle-import requires --cwd, --bundle, and --request"},
-		{command: "review-validate", want: "review-validate requires --cwd, --receipt, and --request"},
+		{command: "review-validate", want: "review lifecycle gate denied: invalidated", wantOutput: "review-validate requires --cwd and --receipt"},
 	} {
 		t.Run(test.command, func(t *testing.T) {
 			var output bytes.Buffer
 			err := RunArgs([]string{test.command}, &output)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("RunArgs(%s) error = %v, want %q", test.command, err, test.want)
+			}
+			if test.wantOutput != "" && !strings.Contains(output.String(), test.wantOutput) {
+				t.Fatalf("RunArgs(%s) output = %q, want %q", test.command, output.String(), test.wantOutput)
+			}
+		})
+	}
+}
+
+func TestRunArgsReviewSubcommandHelpExitsSuccessfully(t *testing.T) {
+	for _, command := range []string{"review-start", "review-step", "review-resume", "review-validate", "review-bundle-export", "review-bundle-import"} {
+		t.Run(command, func(t *testing.T) {
+			var output bytes.Buffer
+			if err := RunArgs([]string{command, "--help"}, &output); err != nil {
+				t.Fatalf("RunArgs(%s --help) error = %v", command, err)
+			}
+			if !strings.Contains(output.String(), "Usage: gentle-ai "+command+" [flags]") {
+				t.Fatalf("RunArgs(%s --help) output:\n%s", command, output.String())
 			}
 		})
 	}

@@ -162,6 +162,7 @@ type GateContext struct {
 	EvidenceHash          string                      `json:"evidence_hash"`
 	BaseRelationshipValid bool                        `json:"base_relationship_valid"`
 	ExternalEvidence      ExternalEvidenceDisposition `json:"external_evidence,omitempty"`
+	BaseAdvance           *BaseAdvanceCompatibility   `json:"base_advanced_compatible,omitempty"`
 	Release               *ReleaseEvidence            `json:"release,omitempty"`
 }
 
@@ -175,19 +176,22 @@ func validateDerivedGate(receipt Receipt, context GateContext) GateResult {
 	if receipt.TerminalState != TerminalApproved {
 		return GateInvalidated
 	}
-	if receipt.LineageID != context.LineageID || receipt.Generation != context.Generation ||
-		receipt.FinalCandidateTree != context.CandidateTree || receipt.PathsDigest != context.PathsDigest {
+	compatibleAdvance := context.Gate == GatePrePR && context.BaseAdvance != nil && context.BaseAdvance.Compatible
+	if receipt.LineageID != context.LineageID || receipt.Generation != context.Generation {
+		return GateScopeChanged
+	}
+	if (receipt.FinalCandidateTree != context.CandidateTree || receipt.PathsDigest != context.PathsDigest) && !compatibleAdvance {
 		return GateScopeChanged
 	}
 	if context.ExternalEvidence == ExternalEvidenceInvalidating {
 		return GateInvalidated
 	}
-	if receipt.BaseTree != context.BaseTree || receipt.FixDeltaHash != context.FixDeltaHash ||
+	if (receipt.BaseTree != context.BaseTree && !compatibleAdvance) || receipt.FixDeltaHash != context.FixDeltaHash ||
 		receipt.PolicyHash != context.PolicyHash || receipt.LedgerHash != context.LedgerHash ||
 		receipt.EvidenceHash != context.EvidenceHash {
 		return GateInvalidated
 	}
-	if (context.Gate == GatePrePR || context.Gate == GateRelease) && !context.BaseRelationshipValid {
+	if (context.Gate == GatePrePR || context.Gate == GateRelease) && !context.BaseRelationshipValid && !compatibleAdvance {
 		return GateInvalidated
 	}
 	if context.Gate == GateRelease {
@@ -228,6 +232,11 @@ func ParseGateContext(payload []byte) (GateContext, error) {
 	if context.Release != nil {
 		if err := validateReleaseEvidence(*context.Release); err != nil {
 			return GateContext{}, err
+		}
+	}
+	if context.BaseAdvance != nil {
+		if context.Gate != GatePrePR || !context.BaseAdvance.valid() {
+			return GateContext{}, errors.New("gate context contains invalid compatible base advance evidence")
 		}
 	}
 	switch context.ExternalEvidence {

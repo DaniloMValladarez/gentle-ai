@@ -81,6 +81,39 @@ func TestRunReviewStartBuildsCompleteTargetWithoutMutatingRealIndex(t *testing.T
 	}
 }
 
+func TestReviewSubcommandHelpIsCompleteAndSuccessful(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func([]string, io.Writer) error
+		want []string
+	}{
+		{name: "review-start", run: RunReviewStart, want: []string{"--cwd", "--lineage", "--policy-file"}},
+		{name: "review-step", run: RunReviewStep, want: []string{"--operation", "record-lens-result", "complete-final-verification", strings.TrimSuffix(canonicalEmptyReviewLedger, "\n") + `\n`}},
+		{name: "review-resume", run: RunReviewResume, want: []string{"--cwd", "--lineage"}},
+		{name: "review-validate", run: RunReviewValidate, want: []string{"--request", "--gate", "--bundle", "--pre-pr-ci-attestation", "--release-provenance", "--request-out"}},
+		{name: "review-bundle-export", run: RunReviewBundleExport, want: []string{"--cwd", "--lineage", "--out"}},
+		{name: "review-bundle-import", run: RunReviewBundleImport, want: []string{"--cwd", "--bundle", "--request"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, helpFlag := range []string{"-h", "--help"} {
+				var output bytes.Buffer
+				if err := tt.run([]string{helpFlag}, &output); err != nil {
+					t.Fatalf("%s %s error = %v", tt.name, helpFlag, err)
+				}
+				if !strings.Contains(output.String(), "Usage: gentle-ai "+tt.name+" [flags]") {
+					t.Fatalf("%s %s missing usage:\n%s", tt.name, helpFlag, output.String())
+				}
+				for _, want := range tt.want {
+					if !strings.Contains(output.String(), want) {
+						t.Errorf("%s %s help missing %q:\n%s", tt.name, helpFlag, want, output.String())
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestRunReviewStartRequiresAuthoritativeCASAndRetryCannotResetState(t *testing.T) {
 	repo := initReviewCLIRepo(t)
 	policy := filepath.Join(t.TempDir(), "policy.md")
@@ -621,6 +654,10 @@ func TestRunReviewValidateDerivesCurrentFactsAndDeniesWithJSON(t *testing.T) {
 	request.GenesisRevision = bundle.GenesisRevision
 	request.ChainIdentity = bundle.ChainIdentity
 	request.BundleDigest = bundle.BundleDigest
+	bundlePath := filepath.Join(artifacts, "chain-bundle.json")
+	if err := reviewtransaction.WriteChainBundleAtomic(bundlePath, bundle); err != nil {
+		t.Fatal(err)
+	}
 	requestPath := filepath.Join(artifacts, "gate-request.json")
 	writeReviewCLIJSON(t, requestPath, request)
 
@@ -629,6 +666,40 @@ func TestRunReviewValidateDerivesCurrentFactsAndDeniesWithJSON(t *testing.T) {
 		t.Fatalf("RunReviewValidate(exact) error = %v\n%s", err, output.String())
 	}
 	assertReviewGateResult(t, output.Bytes(), reviewtransaction.GateAllow)
+	explicitOutput := append([]byte(nil), output.Bytes()...)
+	requestOut := filepath.Join(artifacts, "native-request.json")
+	output.Reset()
+	if err := RunReviewValidate([]string{
+		"--cwd", repo, "--receipt", receiptPath,
+		"--lineage", receipt.LineageID, "--gate", string(reviewtransaction.GatePostApply),
+		"--bundle", bundlePath, "--policy", policyPath, "--ledger", ledgerPath, "--evidence", evidencePath,
+		"--request-out", requestOut,
+	}, &output); err != nil {
+		t.Fatalf("RunReviewValidate(native) error = %v\n%s", err, output.String())
+	}
+	if !bytes.Equal(output.Bytes(), explicitOutput) {
+		t.Fatalf("native and explicit validation results differ\nexplicit:\n%s\nnative:\n%s", explicitOutput, output.Bytes())
+	}
+	nativeRequestPayload, err := os.ReadFile(requestOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nativeRequest, err := reviewtransaction.ParseGateRequest(nativeRequestPayload)
+	if err != nil {
+		t.Fatalf("request-out is not canonical: %v", err)
+	}
+	if nativeRequest.StoreRevision != request.StoreRevision || nativeRequest.ChainIdentity != request.ChainIdentity || nativeRequest.Target.Kind != request.Target.Kind {
+		t.Fatalf("native request did not derive canonical authority: %#v", nativeRequest)
+	}
+	output.Reset()
+	err = RunReviewValidate([]string{
+		"--cwd", repo, "--receipt", receiptPath, "--request", requestPath,
+		"--gate", string(reviewtransaction.GatePostApply),
+	}, &output)
+	if err == nil {
+		t.Fatalf("mixed explicit/native mode error = %v", err)
+	}
+	assertReviewGateResult(t, output.Bytes(), reviewtransaction.GateInvalidated)
 
 	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("scope changed\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -655,6 +726,11 @@ func TestRunReviewValidateDerivesCurrentFactsAndDeniesWithJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	request.ExternalEvidence = reviewtransaction.ExternalEvidenceEscalating
+	externalEvidencePath := filepath.Join(artifacts, "external-evidence.json")
+	writeReviewCLIJSON(t, externalEvidencePath, map[string]any{
+		"schema": "gentle-ai.external-review-evidence/v1", "disposition": "escalating", "evidence_hash": cliHash("e"),
+	})
+	request.ExternalEvidenceArtifact = externalEvidencePath
 	writeReviewCLIJSON(t, requestPath, request)
 	output.Reset()
 	if err := RunReviewValidate([]string{"--cwd", repo, "--receipt", receiptPath, "--request", requestPath}, &output); err == nil {
@@ -664,12 +740,37 @@ func TestRunReviewValidateDerivesCurrentFactsAndDeniesWithJSON(t *testing.T) {
 
 	request.Target = reviewtransaction.Target{Kind: reviewtransaction.TargetBaseDiff, BaseRef: strings.Repeat("f", 40)}
 	request.ExternalEvidence = reviewtransaction.ExternalEvidenceNone
+	request.ExternalEvidenceArtifact = ""
 	writeReviewCLIJSON(t, requestPath, request)
 	output.Reset()
 	if err := RunReviewValidate([]string{"--cwd", repo, "--receipt", receiptPath, "--request", requestPath}, &output); err != nil {
 		t.Fatalf("RunReviewValidate ignores historical target and derives current lifecycle state: %v", err)
 	}
 	assertReviewGateResult(t, output.Bytes(), reviewtransaction.GateAllow)
+
+	for name, args := range map[string][]string{
+		"missing receipt":       {"--cwd", repo, "--receipt", filepath.Join(artifacts, "missing-receipt.json"), "--request", requestPath},
+		"missing native bundle": {"--cwd", repo, "--receipt", receiptPath, "--lineage", receipt.LineageID, "--gate", string(reviewtransaction.GatePostApply), "--bundle", filepath.Join(artifacts, "missing-bundle.json"), "--policy", policyPath, "--ledger", ledgerPath, "--evidence", evidencePath},
+	} {
+		t.Run(name+" emits denial JSON", func(t *testing.T) {
+			output.Reset()
+			if err := RunReviewValidate(args, &output); err == nil {
+				t.Fatal("RunReviewValidate() returned process success")
+			}
+			assertReviewGateResult(t, output.Bytes(), reviewtransaction.GateInvalidated)
+		})
+	}
+	if err := os.WriteFile(requestPath, []byte(`{"secret":"must-not-be-reflected"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := RunReviewValidate([]string{"--cwd", repo, "--receipt", receiptPath, "--request", requestPath}, &output); err == nil {
+		t.Fatal("RunReviewValidate(malformed request) returned process success")
+	}
+	assertReviewGateResult(t, output.Bytes(), reviewtransaction.GateInvalidated)
+	if strings.Contains(output.String(), "must-not-be-reflected") {
+		t.Fatal("malformed request denial leaked artifact contents")
+	}
 }
 
 func TestRunReviewValidateRejectsCallerSelectedForgedTerminalStore(t *testing.T) {
@@ -739,12 +840,11 @@ func TestRunReviewBundleExportImportRecoversCorrectedLineageInCleanClone(t *test
 	artifacts := t.TempDir()
 	policyPath := filepath.Join(artifacts, "policy.md")
 	ledgerPath := filepath.Join(artifacts, "ledger.json")
-	fixDeltaPath := filepath.Join(artifacts, "fix-delta.patch")
+	fixDeltaPath := filepath.Join(artifacts, "fix-delta.json")
 	evidencePath := filepath.Join(artifacts, "evidence.md")
 	for path, content := range map[string]string{
 		policyPath:   "bounded policy\n",
 		ledgerPath:   "{\"schema\":\"gentle-ai.review-ledger/v1\",\"findings\":[{\"id\":\"BRT1-005\"}]}\n",
-		fixDeltaPath: "portable recovery correction\n",
 		evidencePath: "verified corrected delivery\n",
 	} {
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
@@ -763,7 +863,6 @@ func TestRunReviewBundleExportImportRecoversCorrectedLineageInCleanClone(t *test
 	}
 	policyHash, _ := reviewtransaction.HashArtifact(policyPath)
 	ledgerHash, _ := reviewtransaction.HashLedgerArtifact(ledgerPath)
-	fixDeltaHash, _ := reviewtransaction.HashArtifact(fixDeltaPath)
 	evidenceHash, _ := reviewtransaction.HashArtifact(evidencePath)
 	tx, err := reviewtransaction.NewTransaction(reviewtransaction.Start{LineageID: "portable-corrected-cli", Mode: reviewtransaction.ModeOrdinary4R, Generation: 1, Snapshot: snapshot, PolicyHash: policyHash})
 	if err != nil {
@@ -814,7 +913,11 @@ func TestRunReviewBundleExportImportRecoversCorrectedLineageInCleanClone(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := tx.CompleteFix(fixSnapshot, fixDeltaHash, []string{"BRT1-005"}); err != nil {
+	if err := tx.CompleteFix(fixSnapshot, "", []string{"BRT1-005"}); err != nil {
+		t.Fatal(err)
+	}
+	fixDeltaPayload, _ := json.MarshalIndent(fixSnapshot, "", "  ")
+	if err := os.WriteFile(fixDeltaPath, append(fixDeltaPayload, '\n'), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	appendState("review/complete-fix")
@@ -870,7 +973,7 @@ func TestRunReviewBundleExportImportRecoversCorrectedLineageInCleanClone(t *test
 	}
 	writeReviewCLIJSON(t, requestPath, request)
 
-	wrongFixPath := filepath.Join(artifacts, "wrong-fix-delta.patch")
+	wrongFixPath := filepath.Join(artifacts, "wrong-fix-delta.json")
 	if err := os.WriteFile(wrongFixPath, []byte("different correction\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -883,15 +986,15 @@ func TestRunReviewBundleExportImportRecoversCorrectedLineageInCleanClone(t *test
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git clone: %v: %s", err, output)
 	}
-	if err := RunReviewBundleImport([]string{"--cwd", wrongClone, "--bundle", bundlePath, "--receipt", receiptPath, "--request", wrongRequestPath}, io.Discard); err != nil {
-		t.Fatalf("RunReviewBundleImport() trusted unrelated fix-delta prose: %v", err)
+	if err := RunReviewBundleImport([]string{"--cwd", wrongClone, "--bundle", bundlePath, "--receipt", receiptPath, "--request", wrongRequestPath}, io.Discard); err == nil {
+		t.Fatal("RunReviewBundleImport() trusted unrelated fix-delta bytes")
 	}
 	wrongStore, err := reviewtransaction.AuthoritativeStore(context.Background(), wrongClone, tx.LineageID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := wrongStore.LoadChain(); err != nil {
-		t.Fatalf("derived corrected import did not install authoritative chain: %v", err)
+	if _, err := wrongStore.LoadChain(); err == nil {
+		t.Fatal("rejected corrected import installed an authoritative chain")
 	}
 
 	clone := filepath.Join(t.TempDir(), "clone")
@@ -909,6 +1012,183 @@ func TestRunReviewBundleExportImportRecoversCorrectedLineageInCleanClone(t *test
 	}
 	if result.BundleDigest != bundle.BundleDigest || result.StoreRevision != bundle.HeadRevision || result.ChainIdentity != bundle.ChainIdentity {
 		t.Fatalf("bundle import result = %#v", result)
+	}
+}
+
+func TestRunReviewValidateExplicitAndNativeResultsAreByteEquivalentAcrossPublicationGates(t *testing.T) {
+	for _, gate := range []reviewtransaction.GateKind{
+		reviewtransaction.GatePreCommit,
+		reviewtransaction.GatePrePush,
+		reviewtransaction.GatePrePR,
+		reviewtransaction.GateRelease,
+	} {
+		t.Run(string(gate), func(t *testing.T) {
+			fixture := newCLIGateParityFixture(t, gate)
+			nativeInput := reviewtransaction.NativeGateRequestInput{
+				Gate: gate, LineageID: fixture.receipt.LineageID, BundleArtifact: fixture.bundle,
+				PolicyArtifact: fixture.policy, LedgerArtifact: fixture.ledger, EvidenceArtifact: fixture.evidence,
+				BaseRef: "main", ReleaseConfiguration: fixture.configuration, ReleaseGenerated: fixture.generated,
+				ReleaseProvenance: fixture.provenance, ReleasePublicationBoundary: fixture.boundary,
+				ReleaseEvidenceFreshness: fixture.freshness,
+			}
+			explicitRequest, err := reviewtransaction.BuildNativeGateRequest(context.Background(), fixture.repo, nativeInput)
+			if err != nil {
+				t.Fatalf("BuildNativeGateRequest(%s) error = %v", gate, err)
+			}
+			requestPath := filepath.Join(t.TempDir(), "request.json")
+			writeReviewCLIJSON(t, requestPath, explicitRequest)
+			nativeArgs := []string{
+				"--cwd", fixture.repo, "--receipt", fixture.receiptPath,
+				"--lineage", fixture.receipt.LineageID, "--gate", string(gate), "--bundle", fixture.bundle,
+				"--policy", fixture.policy, "--ledger", fixture.ledger, "--evidence", fixture.evidence,
+			}
+			if gate == reviewtransaction.GatePrePR {
+				nativeArgs = append(nativeArgs, "--base-ref", "main")
+			}
+			if gate == reviewtransaction.GateRelease {
+				nativeArgs = append(nativeArgs,
+					"--release-configuration", fixture.configuration,
+					"--release-generated", fixture.generated,
+					"--release-provenance", fixture.provenance,
+					"--release-publication-boundary", fixture.boundary,
+					"--release-evidence-freshness", fixture.freshness,
+				)
+			}
+
+			assertEquivalentGateResults(t, fixture.repo, fixture.receiptPath, requestPath, nativeArgs, reviewtransaction.GateAllow)
+			if err := os.WriteFile(fixture.ledger, []byte(`{"schema":"gentle-ai.review-ledger/v1","findings":[{"id":"stale"}]}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			assertEquivalentGateResults(t, fixture.repo, fixture.receiptPath, requestPath, nativeArgs, reviewtransaction.GateInvalidated)
+		})
+	}
+}
+
+type cliGateParityFixture struct {
+	repo, receiptPath, bundle, policy, ledger, evidence       string
+	configuration, generated, provenance, boundary, freshness string
+	receipt                                                   reviewtransaction.Receipt
+}
+
+func newCLIGateParityFixture(t *testing.T, gate reviewtransaction.GateKind) cliGateParityFixture {
+	t.Helper()
+	repo := initReviewCLIRepo(t)
+	runReviewCLIGit(t, repo, "branch", "main", "HEAD")
+	configureCLIReviewPublicationRemote(t, repo, "main")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("reviewed candidate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := (reviewtransaction.SnapshotBuilder{Repo: repo}).Build(context.Background(), reviewtransaction.Target{Kind: reviewtransaction.TargetCurrentChanges, IntendedUntracked: []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts := t.TempDir()
+	fixture := cliGateParityFixture{
+		repo:   repo,
+		policy: filepath.Join(artifacts, "policy.json"), ledger: filepath.Join(artifacts, "ledger.json"),
+		evidence: filepath.Join(artifacts, "evidence.txt"), receiptPath: filepath.Join(artifacts, "receipt.json"),
+		bundle: filepath.Join(artifacts, "bundle.json"), configuration: filepath.Join(artifacts, "configuration.txt"),
+		generated: filepath.Join(artifacts, "generated.txt"), provenance: filepath.Join(artifacts, "provenance.txt"),
+		boundary: filepath.Join(artifacts, "boundary.json"), freshness: filepath.Join(artifacts, "freshness.json"),
+	}
+	for path, content := range map[string]string{
+		fixture.policy: "{}\n", fixture.ledger: "{\"schema\":\"gentle-ai.review-ledger/v1\",\"findings\":[]}\n",
+		fixture.evidence: "verified\n", fixture.configuration: "configuration\n", fixture.generated: "generated\n", fixture.provenance: "provenance\n",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	policyHash, _ := reviewtransaction.HashArtifact(fixture.policy)
+	ledgerHash, _ := reviewtransaction.HashLedgerArtifact(fixture.ledger)
+	evidenceHash, _ := reviewtransaction.HashArtifact(fixture.evidence)
+	tx, err := reviewtransaction.NewTransaction(reviewtransaction.Start{LineageID: "parity-" + string(gate), Mode: reviewtransaction.ModeOrdinary4R, Generation: 1, Snapshot: snapshot, PolicyHash: policyHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := reviewtransaction.AuthoritativeStore(context.Background(), repo, tx.LineageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision := ""
+	appendState := func(operation string) {
+		var appendErr error
+		revision, appendErr = store.Append(revision, reviewtransaction.Record{Operation: operation, Transaction: *tx})
+		if appendErr != nil {
+			t.Fatalf("Append(%s) error = %v", operation, appendErr)
+		}
+	}
+	_ = tx.StartReview()
+	appendState("review/start")
+	_ = tx.FreezeFindings([]reviewtransaction.Finding{}, ledgerHash)
+	appendState("review/freeze-findings")
+	_, _ = tx.ClassifyEvidence([]reviewtransaction.FindingEvidence{})
+	appendState("review/classify")
+	if gate == reviewtransaction.GateRelease {
+		writeReviewCLIJSON(t, fixture.boundary, map[string]any{"schema": "gentle-ai.release-publication-boundary/v1", "release_tree": snapshot.CandidateTree, "state": "sealed"})
+		writeReviewCLIJSON(t, fixture.freshness, map[string]any{"schema": "gentle-ai.release-evidence-freshness/v1", "release_tree": snapshot.CandidateTree, "evidence_hash": evidenceHash, "state": "current"})
+		configurationHash, _ := reviewtransaction.HashArtifact(fixture.configuration)
+		generatedHash, _ := reviewtransaction.HashArtifact(fixture.generated)
+		provenanceHash, _ := reviewtransaction.HashArtifact(fixture.provenance)
+		boundaryHash, _ := reviewtransaction.HashArtifact(fixture.boundary)
+		freshnessHash, _ := reviewtransaction.HashArtifact(fixture.freshness)
+		if err := tx.BindReleaseEvidence(reviewtransaction.ReleaseEvidence{
+			ReleaseTree: snapshot.CandidateTree, ConfigurationHash: configurationHash, GeneratedArtifactHash: generatedHash,
+			ProvenanceHash: provenanceHash, PublicationBoundaryHash: boundaryHash, PublicationState: reviewtransaction.PublicationStateSealed,
+			EvidenceFreshnessHash: freshnessHash, EvidenceFreshnessState: reviewtransaction.EvidenceFreshnessCurrent,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		appendState("review/bind-release-evidence")
+	}
+	_ = tx.BeginFinalVerification()
+	appendState("review/begin-final-verification")
+	_ = tx.CompleteFinalVerification(evidenceHash, true)
+	appendState("review/complete-final-verification")
+	fixture.receipt, err = tx.Receipt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeReviewCLIJSON(t, fixture.receiptPath, fixture.receipt)
+	bundle, err := store.ExportBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reviewtransaction.WriteChainBundleAtomic(fixture.bundle, bundle); err != nil {
+		t.Fatal(err)
+	}
+	if gate != reviewtransaction.GatePreCommit {
+		runReviewCLIGit(t, repo, "add", "tracked.txt")
+		runReviewCLIGit(t, repo, "commit", "-qm", "reviewed candidate")
+	}
+	return fixture
+}
+
+func assertEquivalentGateResults(t *testing.T, repo, receiptPath, requestPath string, nativeArgs []string, want reviewtransaction.GateResult) {
+	t.Helper()
+	var explicitOutput, nativeOutput bytes.Buffer
+	explicitErr := RunReviewValidate([]string{"--cwd", repo, "--receipt", receiptPath, "--request", requestPath}, &explicitOutput)
+	nativeErr := RunReviewValidate(nativeArgs, &nativeOutput)
+	if (explicitErr == nil) != (want == reviewtransaction.GateAllow) || (nativeErr == nil) != (want == reviewtransaction.GateAllow) {
+		t.Fatalf("gate errors explicit=%v native=%v, want %s", explicitErr, nativeErr, want)
+	}
+	if !bytes.Equal(explicitOutput.Bytes(), nativeOutput.Bytes()) {
+		t.Fatalf("explicit/native results differ\nexplicit:\n%s\nnative:\n%s", explicitOutput.Bytes(), nativeOutput.Bytes())
+	}
+	assertReviewGateResult(t, explicitOutput.Bytes(), want)
+}
+
+func configureCLIReviewPublicationRemote(t *testing.T, repo, branch string) {
+	t.Helper()
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	command := exec.Command("git", "clone", "--bare", repo, remote)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git clone --bare: %v: %s", err, output)
+	}
+	runReviewCLIGit(t, repo, "remote", "add", "origin", remote)
+	command = exec.Command("git", "--git-dir", remote, "symbolic-ref", "HEAD", "refs/heads/"+branch)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("configure remote HEAD: %v: %s", err, output)
 	}
 }
 

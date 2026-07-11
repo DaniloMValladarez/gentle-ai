@@ -28,6 +28,10 @@ var boundedReviewRequiredClauses = []string{
 	"Only the parent orchestrator may launch a correction actor or scoped validator",
 	"openspec/changes/{change-name}/reviews/transaction.json",
 	"sdd/{change-name}/review/transaction",
+	"gentle-ai review-validate --cwd <repo> --lineage <id> --gate",
+	"never hand-author request JSON",
+	"base_advanced_compatible",
+	"Ed25519",
 	"Model, provider, profile, and effort selection remain optional user choices",
 }
 

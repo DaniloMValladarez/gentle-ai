@@ -47,8 +47,12 @@ func TestOrchestratorsRequireNonSkippableGeneralDelegationTriggers(t *testing.T)
 		if !lineContainsAll(
 			"before commit, push, PR, or release",
 			"content-bound receipt",
-			"`review-validate`",
-			"never launch a lens",
+			"review-validate --cwd <repo>",
+			"--lineage <id>",
+			"--gate <gate>",
+			"--bundle <path>",
+			"never hand-author request JSON",
+			"launch a lens",
 			"Judgment Day",
 			"new budget at the gate",
 		)(lifecycleLine) {
@@ -1606,7 +1610,10 @@ func boundedReviewRoutingProblems(content string) []string {
 			matcher: lineContainsAll(
 				"before commit, push, PR, or release",
 				"content-bound receipt",
-				"`review-validate`",
+				"review-validate --cwd <repo>",
+				"--lineage <id>",
+				"--gate <gate>",
+				"never hand-author request JSON",
 				"never launch a lens",
 				"Judgment Day",
 				"new budget at the gate",
