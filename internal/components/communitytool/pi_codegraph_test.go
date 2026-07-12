@@ -346,6 +346,49 @@ func TestPiCodeGraphPathsExcludesUnsafeManifestPaths(t *testing.T) {
 	}
 }
 
+func TestPiCodeGraphManifestPermissionsSafe(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		goos string
+		mode os.FileMode
+		want bool
+	}{
+		{name: "Windows normal file", goos: "windows", mode: 0o666, want: true},
+		{name: "Windows read-only file", goos: "windows", mode: 0o444, want: true},
+		{name: "POSIX private file", goos: "linux", mode: 0o600, want: true},
+		{name: "POSIX group-readable file", goos: "linux", mode: 0o644, want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := piCodeGraphManifestPermissionsSafe(tt.goos, tt.mode); got != tt.want {
+				t.Fatalf("piCodeGraphManifestPermissionsSafe(%q, %o) = %v, want %v", tt.goos, tt.mode, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReadPiCodeGraphManifestPreservesFileErrors(t *testing.T) {
+	t.Run("read error", func(t *testing.T) {
+		if _, err := readPiCodeGraphManifest(t.TempDir()); err == nil {
+			t.Fatal("readPiCodeGraphManifest() error = nil, want read error")
+		}
+	})
+
+	t.Run("stat error", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "manifest.json")
+		if err := os.WriteFile(path, []byte(`{"children":{}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		wantErr := errors.New("stat failed")
+		previousStat := piCodeGraphManifestStat
+		piCodeGraphManifestStat = func(string) (os.FileInfo, error) { return nil, wantErr }
+		t.Cleanup(func() { piCodeGraphManifestStat = previousStat })
+
+		if _, err := readPiCodeGraphManifest(path); !errors.Is(err, wantErr) {
+			t.Fatalf("readPiCodeGraphManifest() error = %v, want wrapped %v", err, wantErr)
+		}
+	})
+}
+
 func TestVerifyPiCodeGraphRejectsNonCanonicalMCP(t *testing.T) {
 	home := t.TempDir()
 	mcpPath := filepath.Join(home, "mcp.json")
