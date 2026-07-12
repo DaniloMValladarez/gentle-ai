@@ -159,7 +159,7 @@ func InjectCodeGraphGuidance(homeDir string) (GuidanceInjectionResult, error) {
 	result := GuidanceInjectionResult{}
 	for _, installedAgent := range installed {
 		adapter, ok := reg.Get(installedAgent.ID)
-		if !ok || !isCodeGraphSupportedAgent(installedAgent.ID) || !adapter.SupportsSystemPrompt() || installedAgent.ID == model.AgentPi {
+		if !ok || !isCodeGraphCompatibleAgent(installedAgent.ID) || !adapter.SupportsSystemPrompt() || installedAgent.ID == model.AgentPi {
 			continue
 		}
 
@@ -189,7 +189,7 @@ func CodeGraphGuidancePaths(homeDir string) []string {
 	paths := make([]string, 0, len(installed))
 	for _, installedAgent := range installed {
 		adapter, ok := reg.Get(installedAgent.ID)
-		if !ok || !isCodeGraphSupportedAgent(installedAgent.ID) || !adapter.SupportsSystemPrompt() {
+		if !ok || !isCodeGraphCompatibleAgent(installedAgent.ID) || !adapter.SupportsSystemPrompt() {
 			continue
 		}
 		path := adapter.SystemPromptFile(homeDir)
@@ -212,7 +212,7 @@ func CodeGraphManagedPaths(homeDir string) []string {
 	paths := append([]string(nil), CodeGraphGuidancePaths(homeDir)...)
 	for _, installedAgent := range agents.DiscoverInstalled(reg, homeDir) {
 		adapter, ok := reg.Get(installedAgent.ID)
-		if !ok || !isCodeGraphSupportedAgent(installedAgent.ID) {
+		if !ok || !isCodeGraphCompatibleAgent(installedAgent.ID) {
 			continue
 		}
 		paths = append(paths, codeGraphToolWiringPaths(homeDir, adapter)...)

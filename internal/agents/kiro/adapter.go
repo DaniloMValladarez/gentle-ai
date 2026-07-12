@@ -48,20 +48,17 @@ func (a *Adapter) Detect(_ context.Context, homeDir string) (bool, string, strin
 	// artifacts live), NOT GlobalConfigDir() which points to the OS app-config
 	// dir (%APPDATA%\kiro\User on Windows) used only for settings.json.
 	configPath := filepath.Join(homeDir, ".kiro")
+	info, statErr := a.statPath(configPath)
+	configFound := statErr == nil && info.IsDir()
 
 	binaryPath, err := a.lookPath("kiro")
 	if err != nil {
 		if errors.Is(err, exec.ErrNotFound) {
-			// Binary not found — Kiro is not installed.
-			return false, "", configPath, false, nil
+			return false, "", configPath, configFound, nil
 		}
 		// Unexpected error (permission / IO) — surface it so callers can distinguish.
 		return false, "", configPath, false, err
 	}
-
-	// Binary found — check whether the config dir already exists.
-	info, statErr := a.statPath(configPath)
-	configFound := statErr == nil && info.IsDir()
 
 	return true, binaryPath, configPath, configFound, nil
 }
@@ -85,7 +82,7 @@ func (a *Adapter) InstallCommand(_ system.PlatformProfile) ([][]string, error) {
 // Steering content is written to ~/.kiro/steering/gentle-ai.md via StrategySteeringFile.
 
 func (a *Adapter) GlobalConfigDir(homeDir string) string {
-	return a.kiroConfigDir(homeDir)
+	return filepath.Join(homeDir, ".kiro")
 }
 
 func (a *Adapter) SystemPromptDir(homeDir string) string {
@@ -107,6 +104,8 @@ func (a *Adapter) SkillsDir(homeDir string) string {
 }
 
 func (a *Adapter) SettingsPath(homeDir string) string {
+	// Kiro's OS app settings remain a secondary Gentle AI path; CodeGraph MCP
+	// ownership is rooted independently under ~/.kiro/settings.
 	return filepath.Join(a.kiroConfigDir(homeDir), "settings.json")
 }
 

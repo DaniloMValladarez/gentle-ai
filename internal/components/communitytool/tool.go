@@ -131,21 +131,31 @@ func InstallWithHome(id model.CommunityToolID, workspaceDir string, homeDir stri
 	result := Result{Tool: id}
 	before := DetectStatus(id, homeDir, detector)
 	result.StatusBefore = &before
+	snapshots, err := snapshotCodeGraphPaths(CodeGraphManagedPaths(homeDir))
+	if err != nil {
+		return result, err
+	}
+	rollback := func(cause error) (Result, error) {
+		if restoreErr := restoreCodeGraphPaths(snapshots); restoreErr != nil {
+			return result, fmt.Errorf("%w; rollback CodeGraph configuration: %v", cause, restoreErr)
+		}
+		return result, cause
+	}
 	if before.CodeGraphReconcileSatisfied() || codeGraphCanRepairWithoutFullInstall(homeDir, before) {
 		if NeedsOpenCodeCodeGraphReconcile(homeDir) {
 			result.CommandsRun = append(result.CommandsRun, "codegraph install --target opencode --location global --yes")
 		}
 		openCodeResult, err := ReconcileOpenCodeCodeGraph(homeDir, runner)
 		if err != nil {
-			return result, err
+			return rollback(err)
 		}
 		guidanceResult, err := InjectCodeGraphGuidanceIfSelected(homeDir, []model.CommunityToolID{id})
 		if err != nil {
-			return result, err
+			return rollback(err)
 		}
 		piResult, err := reconcileDetectedPiCodeGraph(homeDir, workspaceDir)
 		if err != nil {
-			return result, err
+			return rollback(err)
 		}
 		result.PiCodeGraph = piResult
 		if piResult != nil {
@@ -154,7 +164,7 @@ func InstallWithHome(id model.CommunityToolID, workspaceDir string, homeDir stri
 		after := DetectStatus(id, homeDir, detector)
 		result.StatusAfter = &after
 		if err := validateCodeGraphInstallStatus(after); err != nil {
-			return result, err
+			return rollback(err)
 		}
 		if openCodeResult.Changed || guidanceResult.Changed {
 			result.ManualActions = append(result.ManualActions, "CodeGraph is already available and MCP-configured. Agent guidance was updated so enabled agents lazily initialize project indexes when needed.")
@@ -164,12 +174,19 @@ func InstallWithHome(id model.CommunityToolID, workspaceDir string, homeDir stri
 		return result, nil
 	}
 
-	commands := [][]string{{"codegraph", "install", "--yes"}}
+	targets := detectedCodeGraphTargets(homeDir)
+	commands := make([][]string, 0, 2)
+	if len(targets) > 0 {
+		commands = append(commands, []string{"codegraph", "install", "--target", strings.Join(targets, ","), "--location", "global", "--yes"})
+	}
 	if before.CLI != AvailabilityAvailable {
 		var err error
-		commands, err = CodeGraphCommandsForDetector(DetectorFunc(codeGraphPackageLookPath))
+		commands, err = CodeGraphCommandsForDetectorAndTargets(DetectorFunc(codeGraphPackageLookPath), targets)
 		if err != nil {
 			return result, err
+		}
+		if len(targets) == 0 {
+			commands = commands[:1]
 		}
 	}
 	for _, command := range commands {
@@ -178,15 +195,18 @@ func InstallWithHome(id model.CommunityToolID, workspaceDir string, homeDir stri
 		}
 		result.CommandsRun = append(result.CommandsRun, strings.Join(command, " "))
 		if err := runner.Run(command[0], command[1:]...); err != nil {
-			return result, fmt.Errorf("run %q: %w", strings.Join(command, " "), err)
+			return rollback(fmt.Errorf("run %q: %w", strings.Join(command, " "), err))
 		}
 	}
+	if _, err := ReconcileOpenCodeCodeGraph(homeDir, runner); err != nil {
+		return rollback(err)
+	}
 	if _, err := InjectCodeGraphGuidanceIfSelected(homeDir, []model.CommunityToolID{id}); err != nil {
-		return result, err
+		return rollback(err)
 	}
 	piResult, err := reconcileDetectedPiCodeGraph(homeDir, workspaceDir)
 	if err != nil {
-		return result, err
+		return rollback(err)
 	}
 	result.PiCodeGraph = piResult
 	if piResult != nil {
@@ -195,7 +215,7 @@ func InstallWithHome(id model.CommunityToolID, workspaceDir string, homeDir stri
 	after := DetectStatus(id, homeDir, detector)
 	result.StatusAfter = &after
 	if err := validateCodeGraphInstallStatus(after); err != nil {
-		return result, err
+		return rollback(err)
 	}
 	result.ManualActions = append(result.ManualActions, "CodeGraph CLI was installed and supported agents were connected. Project indexes will be created automatically when an enabled agent opens inside a project.")
 	return result, nil
@@ -362,29 +382,8 @@ func codeGraphSupportedAgents() []model.AgentID {
 		return nil
 	}
 	ids := reg.SupportedAgents()
-	ids = slices.DeleteFunc(ids, func(id model.AgentID) bool { return !isCodeGraphSupportedAgent(id) })
+	ids = slices.DeleteFunc(ids, func(id model.AgentID) bool { return !isCodeGraphCompatibleAgent(id) })
 	return ids
-}
-
-func isCodeGraphSupportedAgent(id model.AgentID) bool {
-	return slices.Contains([]model.AgentID{
-		model.AgentAntigravity,
-		model.AgentClaudeCode,
-		model.AgentCodex,
-		model.AgentCursor,
-		model.AgentGeminiCLI,
-		model.AgentHermes,
-		model.AgentKilocode,
-		model.AgentKimi,
-		model.AgentKiroIDE,
-		model.AgentOpenClaw,
-		model.AgentOpenCode,
-		model.AgentPi,
-		model.AgentQwenCode,
-		model.AgentTrae,
-		model.AgentVSCodeCopilot,
-		model.AgentWindsurf,
-	}, id)
 }
 
 func hasCodeGraphWiring(homeDir string, adapter agents.Adapter) (bool, string, string) {
@@ -421,7 +420,7 @@ func hasDetectedCodeGraphToolWiring(homeDir string) bool {
 	}
 	for _, installedAgent := range agents.DiscoverInstalled(reg, homeDir) {
 		adapter, ok := reg.Get(installedAgent.ID)
-		if !ok || !isCodeGraphSupportedAgent(installedAgent.ID) {
+		if !ok || !isCodeGraphCompatibleAgent(installedAgent.ID) {
 			continue
 		}
 		if _, ok := hasCodeGraphToolWiring(homeDir, adapter); ok {
@@ -429,46 +428,6 @@ func hasDetectedCodeGraphToolWiring(homeDir string) bool {
 		}
 	}
 	return false
-}
-
-func hasCodeGraphToolWiring(homeDir string, adapter agents.Adapter) (string, bool) {
-	if detector, ok := adapter.(agents.EffectiveCodeGraphWiringDetector); ok {
-		return detector.EffectiveCodeGraphWiring(homeDir)
-	}
-	paths := codeGraphToolWiringPaths(homeDir, adapter)
-	seen := map[string]struct{}{}
-	for _, path := range paths {
-		if path == "" {
-			continue
-		}
-		if _, ok := seen[path]; ok {
-			continue
-		}
-		seen[path] = struct{}{}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		content := strings.ToLower(string(data))
-		if strings.Contains(content, "codegraph") {
-			return path, true
-		}
-	}
-	return "", false
-}
-
-func codeGraphToolWiringPaths(homeDir string, adapter agents.Adapter) []string {
-	paths := []string{
-		adapter.MCPConfigPath(homeDir, "codegraph"),
-		adapter.SettingsPath(homeDir),
-	}
-	if _, ok := adapter.(agents.EffectiveCodeGraphWiringDetector); ok {
-		settingsPath := adapter.SettingsPath(homeDir)
-		if strings.HasSuffix(settingsPath, ".json") {
-			paths = append(paths, strings.TrimSuffix(settingsPath, ".json")+".jsonc")
-		}
-	}
-	return paths
 }
 
 func agentDisplayName(id model.AgentID) string {
@@ -488,15 +447,19 @@ func defaultHomeDir() string {
 }
 
 func CodeGraphCommands() [][]string {
-	return codeGraphCommands("npm")
+	return codeGraphCommands("npm", nil)
 }
 
 func CodeGraphCommandsForDetector(detector Detector) ([][]string, error) {
+	return CodeGraphCommandsForDetectorAndTargets(detector, nil)
+}
+
+func CodeGraphCommandsForDetectorAndTargets(detector Detector, targets []string) ([][]string, error) {
 	packageManager, err := detectCodeGraphPackageManager(detector)
 	if err != nil {
 		return nil, err
 	}
-	return codeGraphCommands(packageManager), nil
+	return codeGraphCommands(packageManager, targets), nil
 }
 
 func defaultPnpmGlobalBin() (string, error) {
@@ -531,13 +494,14 @@ func detectCodeGraphPackageManager(detector Detector) (string, error) {
 	return "", fmt.Errorf("CodeGraph installation requires either `npm` or `pnpm` in PATH")
 }
 
-func codeGraphCommands(packageManager string) [][]string {
+func codeGraphCommands(packageManager string, targets []string) [][]string {
 	installCommand := []string{"npm", "install", "-g", "@colbymchenry/codegraph@latest"}
 	if packageManager == "pnpm" {
 		installCommand = []string{"pnpm", "add", "-g", "@colbymchenry/codegraph@latest"}
 	}
-	return [][]string{
-		installCommand,
-		{"codegraph", "install", "--yes"},
+	install := []string{"codegraph", "install", "--yes"}
+	if len(targets) > 0 {
+		install = []string{"codegraph", "install", "--target", strings.Join(targets, ","), "--location", "global", "--yes"}
 	}
+	return [][]string{installCommand, install}
 }
